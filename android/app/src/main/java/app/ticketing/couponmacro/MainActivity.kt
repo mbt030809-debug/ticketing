@@ -3,6 +3,7 @@ package app.ticketing.couponmacro
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.app.TimePickerDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
@@ -41,8 +42,10 @@ class MainActivity : Activity() {
     private lateinit var accBox: LinearLayout
     private lateinit var statusLine: TextView
     private lateinit var appLine: TextView
-    private lateinit var chips: LinearLayout
+    private lateinit var timesBox: LinearLayout
     private lateinit var nextLine: TextView
+    private lateinit var autoCb: CheckBox
+    private lateinit var autoLine: TextView
     private lateinit var routeLine: TextView
     private lateinit var couponNote: TextView
     private lateinit var logView: TextView
@@ -50,7 +53,10 @@ class MainActivity : Activity() {
 
     /** 매일 반복되는 회차(예: "12:00, 18:00, 24:00")와 선택값("auto" 또는 "18:00") */
     private var slotsText: String = Schedule.DEFAULT_SLOTS
-    private var slotSel: String = Schedule.AUTO
+    private var slotsOff: String = ""
+
+    /** showForm 이 값을 채우는 동안에는 변경 리스너가 저장하지 않도록 */
+    private var loading = false
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -87,14 +93,30 @@ class MainActivity : Activity() {
         root.addView(appLine)
         root.addView(button("대상 앱 변경") { pickApp() })
 
-        // 2) 회차 (매일 반복)
-        root.addView(section("2. 회차 (매일)"))
-        chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        root.addView(HorizontalScrollView(this).apply { addView(chips) })
+        // 2) 회차 시각 (매일 반복, 개수 제한 없음)
+        root.addView(section("2. 회차 시각 (매일)"))
+        timesBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(timesBox)
+        root.addView(button("＋ 시각 추가") { addSlot() })
         nextLine = TextView(this).apply { setPadding(0, dp(8), 0, 0) }
         root.addView(nextLine)
-        root.addView(button("회차 시각 수정") { editSlots() })
-        root.addView(note("'자동'은 다음 회차를 알아서 골라요. 시작 버튼은 회차마다 한 번씩 누르면 됩니다."))
+        autoCb = CheckBox(this).apply { text = "매일 켜진 시각에 자동 실행 (1분 전 잠금 해제 알람)" }
+        autoCb.setOnCheckedChangeListener { _, _ ->
+            if (!loading) {
+                saveCurrent()
+                refreshNext()
+            }
+        }
+        root.addView(autoCb)
+        autoLine = TextView(this).apply { textSize = 13f }
+        root.addView(autoLine)
+        root.addView(
+            note(
+                "시각은 2개든 4개든 자유롭게 추가·삭제하고, 체크로 켜고 끕니다. 자동 실행을 켜면 켜진 시각 1분 전에 알람이 울립니다 — " +
+                    "그때 화면 잠금을 풀고 폰을 켜 두세요. 앱이 자동으로 열려 경로를 따라 이동하고 오픈 시각에 누릅니다. " +
+                    "접근성 서비스가 켜져 있어야 하고, 배터리 설정에서 이 앱을 '제한 없음'으로 두면 가장 안정적입니다.",
+            ),
+        )
 
         // 3) 쿠폰 페이지 가는 길
         root.addView(section("3. 쿠폰 페이지 가는 길"))
@@ -170,6 +192,7 @@ class MainActivity : Activity() {
             field(b, K_ALREADY, "이미 받음 문구")
             field(b, K_SOLDOUT, "소진 문구")
             field(b, K_POPUPS, "자동으로 닫을 팝업 버튼 문구")
+            field(b, K_WARN, "자동 실행 알람: 회차 몇 초 전에 울릴지 (20~600, 기본 60)")
             field(b, K_LEAD, "미리 누르기 lead (ms)")
             field(b, K_INTERVAL, "재시도 간격 (ms)")
             field(b, K_ATTEMPTS, "최대 시도 횟수")
@@ -215,6 +238,7 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
         checkUpdate(silent = true)
+        Scheduler.rescheduleAll(this)
     }
 
     override fun onResume() {
@@ -243,7 +267,10 @@ class MainActivity : Activity() {
     }
 
     // ---- 저장 / 프로필 ----
-    private fun saveCurrent() = Store.save(this, profile.id, readForm())
+    private fun saveCurrent() {
+        Store.save(this, profile.id, readForm())
+        Scheduler.rescheduleAll(this) // 자동 실행 알람을 설정에 맞춰 다시 등록
+    }
 
     private fun selectProfile(p: Profile, persist: Boolean) {
         if (persist) saveCurrent()
@@ -263,7 +290,7 @@ class MainActivity : Activity() {
 
     private fun resetProfile() {
         AlertDialog.Builder(this)
-            .setMessage("'${profile.label}' 설정을 기본값으로 되돌릴까요? (대상 앱은 유지, 이동 경로·받을 쿠폰·회차는 기본값으로)")
+            .setMessage("'${profile.label}' 설정을 기본값으로 되돌릴까요? (대상 앱은 유지, 이동 경로·받을 쿠폰·회차·자동 실행은 기본값으로)")
             .setPositiveButton("초기화") { _, _ ->
                 showForm(profile.defaults.copy(pkg = f(K_PKG).ifBlank { profile.defaults.pkg }))
                 saveCurrent()
@@ -408,62 +435,107 @@ class MainActivity : Activity() {
     }
 
     // ---- 회차 ----
-    private fun applySlots(slots: String, sel: String) {
-        val parsed = Schedule.parseSlots(slots).ifEmpty { Schedule.parseSlots(Schedule.DEFAULT_SLOTS) }
-        slotsText = parsed.joinToString(", ") { Schedule.label(it) }
-        val selSec = Schedule.parseSlot(sel)
-        slotSel = if (selSec != null && selSec in parsed) Schedule.label(selSec) else Schedule.AUTO
+    private fun applySlots(slots: String, off: String) {
+        val all = Schedule.parseSlots(slots)
+        slotsText = all.joinToString(", ") { Schedule.label(it) }
+        slotsOff = Schedule.parseSlots(off).filter { it in all }.joinToString(", ") { Schedule.label(it) }
         refreshSchedule()
     }
 
     private fun refreshSchedule() {
-        chips.removeAllViews()
-        fun chip(text: String, key: String) = Button(this).apply {
-            val on = slotSel == key
-            this.text = (if (on) "● " else "") + text
-            setTypeface(null, if (on) Typeface.BOLD else Typeface.NORMAL)
-            alpha = if (on) 1f else 0.6f
-            setOnClickListener {
-                slotSel = key
-                refreshSchedule()
-                saveCurrent()
+        timesBox.removeAllViews()
+        val all = Schedule.parseSlots(slotsText)
+        val off = Schedule.parseSlots(slotsOff).toSet()
+        for (sec in all) {
+            val cb = CheckBox(this).apply {
+                text = Schedule.label(sec)
+                textSize = 18f
+                isChecked = sec !in off
+                setOnCheckedChangeListener { _, on -> setSlotEnabled(sec, on) }
             }
+            val del = Button(this).apply {
+                text = "✕"
+                setOnClickListener { removeSlot(sec) }
+            }
+            timesBox.addView(
+                LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(cb, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(del)
+                },
+            )
         }
-        chips.addView(chip("자동", Schedule.AUTO))
-        for (s in Schedule.parseSlots(slotsText)) chips.addView(chip(Schedule.label(s), Schedule.label(s)))
+        if (all.isEmpty()) timesBox.addView(note("시각이 없습니다. [＋ 시각 추가]로 추가하세요."))
+        refreshNext()
+    }
+
+    private fun setSlotEnabled(sec: Int, on: Boolean) {
+        if (loading) return
+        val off = Schedule.parseSlots(slotsOff).toMutableSet()
+        if (on) off.remove(sec) else off.add(sec)
+        slotsOff = off.sorted().joinToString(", ") { Schedule.label(it) }
+        saveCurrent()
+        refreshNext()
+    }
+
+    private fun removeSlot(sec: Int) {
+        val all = Schedule.parseSlots(slotsText).filter { it != sec }
+        slotsText = all.joinToString(", ") { Schedule.label(it) }
+        slotsOff = Schedule.parseSlots(slotsOff).filter { it != sec }.joinToString(", ") { Schedule.label(it) }
+        refreshSchedule()
+        saveCurrent()
+        refreshNext()
+    }
+
+    private fun addSlot() {
+        val et = EditText(this).apply {
+            hint = "예: 12:00  (초도 가능 11:59:59, 24:00 = 자정)"
+            isSingleLine = true
+        }
+        AlertDialog.Builder(this)
+            .setTitle("시각 추가 (24시간제)")
+            .setView(et)
+            .setPositiveButton("추가") { _, _ -> addSlotText(et.text.toString()) }
+            .setNeutralButton("시계로 선택") { _, _ ->
+                TimePickerDialog(this, { _, h, m -> addSlotText("%02d:%02d".format(h, m)) }, 12, 0, true).show()
+            }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
+    private fun addSlotText(raw: String) {
+        val sec = Schedule.parseSlot(raw)
+        if (sec == null) {
+            toast("시각 형식 오류 — 예: 18:00")
+            return
+        }
+        val all = Schedule.parseSlots(slotsText)
+        if (sec in all) {
+            toast("이미 있는 시각입니다")
+            return
+        }
+        slotsText = (all + sec).sorted().joinToString(", ") { Schedule.label(it) }
+        refreshSchedule()
+        saveCurrent()
         refreshNext()
     }
 
     private fun refreshNext() {
         val now = System.currentTimeMillis()
-        val open = Schedule.nextOpen(Schedule.parseSlots(slotsText), slotSel, now)
-        nextLine.text = if (open == null) "회차 시각을 확인하세요" else "시작하면 → " + Schedule.describe(open, now) + "에 맞춰 대기"
-    }
-
-    private fun editSlots() {
-        val et = EditText(this).apply {
-            setText(slotsText)
-            isSingleLine = true
+        val open = Schedule.nextOpen(Schedule.enabled(slotsText, slotsOff), Schedule.AUTO, now)
+        nextLine.text = if (open == null) "켜진 시각이 없습니다" else "다음 회차: " + Schedule.describe(open, now)
+        autoLine.text = if (!autoCb.isChecked) {
+            ""
+        } else {
+            val t = Scheduler.next(this, now)
+            if (t == null) {
+                "자동 실행할 회차가 없습니다 (켜진 시각 확인)"
+            } else {
+                "자동 실행 예정: " + Schedule.describe(t.occurrenceMs, now) + " · 알람 " +
+                    Schedule.formatOpenAt(t.triggerAtMs).substring(11, 16)
+            }
         }
-        AlertDialog.Builder(this)
-            .setTitle("회차 시각 수정")
-            .setMessage("쉼표로 구분, 24시간제. 24:00 = 자정.\n예: 12:00, 18:00, 24:00 (초도 가능: 11:59:59)")
-            .setView(et)
-            .setPositiveButton("저장") { _, _ ->
-                val raw = et.text.toString()
-                if (Schedule.parseSlots(raw).isEmpty()) {
-                    toast("시각 형식 오류 — 예: 12:00, 18:00, 24:00")
-                } else {
-                    applySlots(raw, slotSel)
-                    saveCurrent()
-                }
-            }
-            .setNeutralButton("기본값") { _, _ ->
-                applySlots(Schedule.DEFAULT_SLOTS, slotSel)
-                saveCurrent()
-            }
-            .setNegativeButton("취소", null)
-            .show()
     }
 
     // ---- 대상 앱 ----
@@ -581,11 +653,14 @@ class MainActivity : Activity() {
         steps = f(K_STEPS), popups = f(K_POPUPS), targets = f(K_TARGETS), coupons = f(K_COUPONS),
         success = f(K_SUCCESS), already = f(K_ALREADY), soldout = f(K_SOLDOUT),
         refreshOnMiss = refreshCb.isChecked,
-        slots = slotsText, slot = slotSel,
+        slots = slotsText, slotsOff = slotsOff,
+        autoRun = autoCb.isChecked, warnSec = f(K_WARN),
         showDots = dotsCb.isChecked,
     )
 
     private fun showForm(s: FormState) {
+        loading = true
+        try {
         fields.getValue(K_PKG).setText(s.pkg)
         launchCb.isChecked = s.launchApp
         fields.getValue(K_LEAD).setText(s.leadMs)
@@ -601,7 +676,13 @@ class MainActivity : Activity() {
         fields.getValue(K_SOLDOUT).setText(s.soldout)
         refreshCb.isChecked = s.refreshOnMiss
         dotsCb.isChecked = s.showDots
-        applySlots(s.slots, s.slot)
+        fields.getValue(K_WARN).setText(s.warnSec)
+        autoCb.isChecked = s.autoRun
+        applySlots(s.slots, s.slotsOff)
+        } finally {
+            loading = false
+        }
+        refreshNext()
     }
 
     // ---- UI 헬퍼 ----
@@ -679,6 +760,7 @@ class MainActivity : Activity() {
     companion object {
         private const val K_PKG = "pkg"
         private const val K_LEAD = "leadMs"
+        private const val K_WARN = "warnSec"
         private const val K_INTERVAL = "intervalMs"
         private const val K_ATTEMPTS = "maxAttempts"
         private const val K_WAIT = "resultWaitSec"

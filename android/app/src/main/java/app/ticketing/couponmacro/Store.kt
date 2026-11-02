@@ -34,9 +34,31 @@ object Store {
             .putString("soldout", f.soldout)
             .putBoolean("refreshOnMiss", f.refreshOnMiss)
             .putString("slots", f.slots)
-            .putString("slot", f.slot)
+            .putString("slotsOff", f.slotsOff)
+            .putBoolean("autoRun", f.autoRun)
+            .putString("warnSec", f.warnSec)
             .putBoolean("showDots", f.showDots)
             .commit()
+    }
+
+    /** 자동 실행이 켜진 이벤트들의 켜진 회차 전부 */
+    fun autoEntries(ctx: Context): List<AutoEntry> = Presets.ALL.flatMap { pr ->
+        val f = load(ctx, pr.id) ?: pr.defaults
+        if (!f.autoRun) {
+            emptyList()
+        } else {
+            val warn = f.warnSec.trim().toIntOrNull()?.coerceIn(20, 600) ?: 60
+            Schedule.enabled(f.slots, f.slotsOff).map { AutoEntry(pr.id, it, warn) }
+        }
+    }
+
+    /** 이미 알람이 울린 회차 키("프로필@오픈시각") — 같은 회차를 두 번 실행하지 않기 위함 */
+    fun handledKeys(ctx: Context): Set<String> =
+        prefs(ctx, "auto").getStringSet("handled", emptySet())?.toSet() ?: emptySet()
+
+    fun markHandled(ctx: Context, key: String, nowMs: Long) {
+        val keep = handledKeys(ctx).filter { (it.substringAfter('@').toLongOrNull() ?: 0L) > nowMs - 3L * 86_400_000 }
+        prefs(ctx, "auto").edit().putStringSet("handled", (keep + key).toSet()).commit()
     }
 
     /** 서비스가 기록한 이동 경로를 앱 화면이 다음에 열릴 때 가져가도록 임시 보관 */
@@ -88,6 +110,12 @@ object Store {
 
     private fun read(p: SharedPreferences): FormState {
         val d = FormState()
+        val slots = p.getString("slots", d.slots).orEmpty()
+        // 구버전: 선택한 회차 하나만 사용(slot) -> 나머지는 꺼 둔 것(slotsOff)으로 이전
+        val slotsOff = p.getString("slotsOff", null) ?: run {
+            val sel = Schedule.parseSlot(p.getString("slot", Schedule.AUTO).orEmpty())
+            if (sel == null) "" else Schedule.parseSlots(slots).filter { it != sel }.joinToString(", ") { Schedule.label(it) }
+        }
         return FormState(
             name = p.getString("name", d.name).orEmpty(),
             pkg = p.getString("pkg", d.pkg).orEmpty(),
@@ -105,8 +133,10 @@ object Store {
             already = p.getString("already", d.already).orEmpty(),
             soldout = p.getString("soldout", d.soldout).orEmpty(),
             refreshOnMiss = p.getBoolean("refreshOnMiss", d.refreshOnMiss),
-            slots = p.getString("slots", d.slots).orEmpty().ifBlank { d.slots },
-            slot = p.getString("slot", d.slot).orEmpty().ifBlank { d.slot },
+            slots = slots,
+            slotsOff = slotsOff,
+            autoRun = p.getBoolean("autoRun", d.autoRun),
+            warnSec = p.getString("warnSec", d.warnSec).orEmpty().ifBlank { d.warnSec },
             showDots = p.getBoolean("showDots", d.showDots),
         )
     }

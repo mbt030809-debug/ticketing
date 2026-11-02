@@ -2,6 +2,7 @@ package app.ticketing.couponmacro
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -107,13 +108,15 @@ class MacroService : AccessibilityService() {
     // ---- 외부 API ----
     fun isRunning(): Boolean = worker?.isAlive == true
 
-    fun start(job: Job, mode: Mode) {
+    /** @return 시작했으면 true, 이미 실행 중이라 못 했으면 false */
+    fun start(job: Job, mode: Mode): Boolean {
         if (isRunning()) {
             LogStore.add("이미 실행 중 — 먼저 취소하세요")
-            return
+            return false
         }
         cancelled = false
         worker = Thread({ runJob(job, mode) }, "macro").also { it.start() }
+        return true
     }
 
     fun cancel() {
@@ -266,8 +269,10 @@ class MacroService : AccessibilityService() {
                     LogStore.add("이동 단계 실패 — 직접 쿠폰 페이지로 이동한 뒤 [쿠폰 목록 읽기]를 누르세요")
                     break
                 }
-                sleep(600)
+                sleep(300)
+                waitForLoaded(job, "이동 ${i + 1}")
             }
+            waitForLoaded(job, "이동 완료")
             showPickBar(job)
             LogStore.add("쿠폰 페이지가 보이면 화면 위 [쿠폰 목록 읽기]를 누르세요")
         } catch (e: InterruptedException) {
@@ -318,6 +323,11 @@ class MacroService : AccessibilityService() {
     }
 
     private fun scanCoupons(job: Job) {
+        try {
+            waitForLoaded(job, "목록 읽기", maxMs = 10_000)
+        } catch (_: InterruptedException) {
+            return
+        }
         val root = targetRoot(job)
         if (root == null) {
             LogStore.add("대상 앱 화면이 아닙니다 — 쿠폰 페이지를 연 뒤 다시 누르세요")
@@ -583,10 +593,40 @@ class MacroService : AccessibilityService() {
             }
         }
 
+        // 자동 실행(알람)으로 시작됐으면 사용자가 잠금을 풀 때까지 기다린다
+        if (job.awaitUnlock && mode == Mode.LIVE && isLocked()) {
+            val deadline = job.openAtMillis - 8_000
+            var reminded = false
+            var lastLog = 0L
+            LogStore.add("잠금 해제 대기 중 — 화면 잠금을 풀어 주세요")
+            while (isLocked()) {
+                checkCancel()
+                val remain = job.openAtMillis - (System.currentTimeMillis() + offset)
+                if (System.currentTimeMillis() + offset >= deadline) {
+                    return Outcome("error", 0, "화면 잠금이 풀리지 않아 이번 회차 자동 실행을 하지 못했습니다")
+                }
+                if (!reminded && remain < 35_000) {
+                    reminded = true
+                    Alerts.warn(this, "🔒 아직 잠겨 있어요!", "지금 잠금을 해제하세요 — 오픈까지 ${remain / 1000}초")
+                }
+                if (SystemClock.elapsedRealtime() - lastLog > 10_000) {
+                    lastLog = SystemClock.elapsedRealtime()
+                    LogStore.add("잠금 해제 대기… 오픈까지 ${remain / 1000}초")
+                }
+                Thread.sleep(500)
+            }
+            LogStore.add("잠금 해제 확인")
+        }
+
         if (job.launchApp) {
             if (!launch(job.pkg)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
             LogStore.add("앱 실행: ${job.pkg}")
-            sleep(2000)
+            sleep(1500)
+            if (!waitForeground(job, 6_000)) {
+                LogStore.add("대상 앱이 자동으로 열리지 않았습니다 (백그라운드 실행 제한일 수 있음) — 직접 열어 주세요")
+                Alerts.warn(this, "앱을 직접 열어 주세요", "${job.name}: 대상 앱이 자동으로 열리지 않았습니다. 앱을 열면 매크로가 이어서 진행합니다")
+            }
+            waitForLoaded(job, "앱 시작")
         } else {
             LogStore.add("앱 실행 생략 — 대상 앱의 쿠폰 화면으로 직접 이동해 두세요")
         }
@@ -595,7 +635,8 @@ class MacroService : AccessibilityService() {
             val ok = waitAndClick(job, s.text, 10_000)
             LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.text}' ${if (ok) "OK" else "못 찾음"}")
             if (!ok && !s.optional) return Outcome("error", 0, "이동 단계 실패: ${s.text}")
-            sleep(600)
+            sleep(300)
+            waitForLoaded(job, "이동 ${i + 1}")   // 다음 단계/쿠폰 선택은 화면 로딩이 끝난 뒤에
         }
 
         if (mode == Mode.LIVE) {
@@ -608,6 +649,7 @@ class MacroService : AccessibilityService() {
                 if (targetRoot(job) != null) {
                     swipeDown()
                     LogStore.add("오픈 직전 새로고침")
+                    waitForLoaded(job, "새로고침", maxMs = 8_000, untilMs = fireAt, offset = offset)
                 }
             }
             // 위치(이미지) 쿠폰은 결과를 '클릭 전엔 없던 새 문구'로 판별하므로, 오픈 1.5초 전 화면을 기준으로 저장
@@ -617,6 +659,7 @@ class MacroService : AccessibilityService() {
             }
             waitUntil(fireAt, offset)
         }
+        if (mode != Mode.LIVE) waitForLoaded(job, "선택 전")
         return clickLoop(job, mode)
     }
 
@@ -1010,6 +1053,74 @@ class MacroService : AccessibilityService() {
         }
     }
 
+    private fun isLocked(): Boolean =
+        (getSystemService(KEYGUARD_SERVICE) as KeyguardManager).isKeyguardLocked
+
+    /** 대상 앱이 화면 앞에 나타날 때까지 대기 */
+    private fun waitForeground(job: Job, timeoutMs: Long): Boolean {
+        val end = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < end) {
+            checkCancel()
+            if (targetRoot(job) != null) return true
+            Thread.sleep(250)
+        }
+        return false
+    }
+
+    private class PageSig(val hash: Int, val loading: Boolean, val hasContent: Boolean)
+
+    /** 화면 내용 시그니처 + 로딩 표시(ProgressBar) 유무 */
+    private fun pageSignature(root: AccessibilityNodeInfo): PageSig {
+        var h = 17
+        var loading = false
+        var seen = 0
+        fun walk(n: AccessibilityNodeInfo) {
+            if (seen++ >= 800) return
+            val cls = n.className?.toString().orEmpty()
+            if (cls.contains("ProgressBar") && n.isVisibleToUser) loading = true
+            h = h * 31 + (n.text?.toString()?.hashCode() ?: 0)
+            h = h * 31 + (n.contentDescription?.toString()?.hashCode() ?: 0)
+            for (i in 0 until n.childCount) n.getChild(i)?.let { walk(it) }
+        }
+        walk(root)
+        return PageSig(h, loading, seen >= 5)
+    }
+
+    /**
+     * 화면 로딩이 끝날 때까지 대기: 로딩 표시가 없고 내용이 1초간 변하지 않으면 완료.
+     * 쿠폰 선택/클릭은 이 대기가 끝난 뒤에 한다. 제한 시간(maxMs)이나 untilMs(오픈 시각 등)를 넘기면 그대로 진행.
+     */
+    private fun waitForLoaded(
+        job: Job, why: String, maxMs: Long = 15_000, untilMs: Long = Long.MAX_VALUE, offset: Long = 0L,
+    ): Boolean {
+        val tracker = StabilityTracker(1_000)
+        val start = SystemClock.elapsedRealtime()
+        var announced = false
+        while (true) {
+            checkCancel()
+            val now = SystemClock.elapsedRealtime()
+            if (now - start >= maxMs || System.currentTimeMillis() + offset >= untilMs) {
+                LogStore.add("화면 로딩 대기 시간 초과($why) — 그대로 진행")
+                return false
+            }
+            val root = targetRoot(job)
+            if (root == null) {
+                tracker.reset()
+            } else {
+                val sig = pageSignature(root)
+                if (tracker.update(sig.hash, sig.loading, sig.hasContent, now)) {
+                    if (announced) LogStore.add("화면 로딩 완료($why)")
+                    return true
+                }
+                if (!announced && now - start > 1_500) {
+                    announced = true
+                    LogStore.add("화면 로딩 대기 중($why)…")
+                }
+            }
+            Thread.sleep(250)
+        }
+    }
+
     private fun sleep(ms: Long) {
         checkCancel()
         Thread.sleep(ms)
@@ -1066,26 +1177,7 @@ class MacroService : AccessibilityService() {
         else -> "오류"
     }
 
-    private fun notifyResult(title: String, text: String) {
-        try {
-            val nm = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(NotificationChannel(CHANNEL, "결과 알림", NotificationManager.IMPORTANCE_HIGH))
-            val n = Notification.Builder(this, CHANNEL)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle(title)
-                .setContentText(text)
-                .setContentIntent(
-                    PendingIntent.getActivity(
-                        this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
-                    ),
-                )
-                .setAutoCancel(true)
-                .build()
-            nm.notify(1, n)
-        } catch (e: Exception) {
-            LogStore.add("알림 실패: $e")
-        }
-    }
+    private fun notifyResult(title: String, text: String) = Alerts.result(this, title, text)
 }
 
 /** AccessibilityNodeInfo -> UiNode 어댑터 */

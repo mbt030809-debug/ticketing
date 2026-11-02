@@ -31,6 +31,8 @@ data class Job(
     val refreshOnMiss: Boolean,
     /** 클릭한 위치에 빨간 점(찾기만: 초록 점)을 잠깐 표시 */
     val showDots: Boolean,
+    /** 자동 실행(알람)으로 시작된 작업: 화면 잠금이 풀릴 때까지 기다린 뒤 진행 */
+    val awaitUnlock: Boolean = false,
 ) {
     val hasResultTexts: Boolean
         get() = successTexts.isNotEmpty() || alreadyTexts.isNotEmpty() || soldoutTexts.isNotEmpty()
@@ -61,6 +63,14 @@ object Parse {
 
 class Parsed(val job: Job?, val error: String?)
 
+/** 자동 실행 후보: 어떤 이벤트(프로필)의 어느 회차(하루 중 초)를 몇 초 전에 알릴지 */
+data class AutoEntry(val profileId: String, val slotSec: Int, val warnSec: Int)
+
+/** 다음 알람: occurrenceMs=오픈 시각, triggerAtMs=알람(작업 시작) 시각 */
+data class Trigger(val profileId: String, val occurrenceMs: Long, val triggerAtMs: Long, val warnSec: Int) {
+    val key: String get() = "$profileId@$occurrenceMs"
+}
+
 /** 매일 반복되는 회차 시각(KST) 계산. 24:00 은 자정(00:00)으로 취급. */
 object Schedule {
     const val AUTO = "auto"
@@ -83,6 +93,40 @@ object Schedule {
 
     /** 쉼표/줄바꿈 구분 문자열 -> 정렬·중복 제거된 슬롯(초). 잘못된 항목은 무시. */
     fun parseSlots(s: String): List<Int> = Parse.list(s).mapNotNull { parseSlot(it) }.distinct().sorted()
+
+    /** 켜진 회차 = slots 중 off(꺼 둔 시각)를 뺀 것 */
+    fun enabled(slots: String, off: String): List<Int> {
+        val offSet = parseSlots(off).toSet()
+        return parseSlots(slots).filter { it !in offSet }
+    }
+
+    /** epoch ms -> "yyyy-MM-dd HH:mm:ss" (KST). FormState.openAt 형식 */
+    fun formatOpenAt(ms: Long): String =
+        Instant.ofEpochMilli(ms).atZone(Parse.ZONE).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+
+    /** 오픈 이만큼 이내로 임박했으면 자동 실행을 건너뜀 (준비할 시간이 없음) */
+    const val MIN_LEAD_MS = 10_000L
+
+    /**
+     * 자동 실행: 다음에 울릴 알람. 매일 반복(오늘/내일 후보 중 가장 이른 것).
+     * handled 에 있는 회차(이미 알람이 울린 것)는 건너뛴다. 알람 시각이 이미 지났지만 아직 오픈 전이면 곧바로(1.5초 뒤) 실행.
+     */
+    fun nextTrigger(entries: List<AutoEntry>, nowMs: Long, handled: Set<String>): Trigger? {
+        val zone = Parse.ZONE
+        val today = Instant.ofEpochMilli(nowMs).atZone(zone).toLocalDate()
+        var best: Trigger? = null
+        for (e in entries) {
+            for (d in -1L..1L) {
+                val occ = today.plusDays(d).atStartOfDay(zone).plusSeconds(e.slotSec.toLong()).toInstant().toEpochMilli()
+                if (occ - MIN_LEAD_MS <= nowMs) continue
+                if ("${e.profileId}@$occ" in handled) continue
+                val t = Trigger(e.profileId, occ, maxOf(occ - e.warnSec * 1000L, nowMs + 1500), e.warnSec)
+                val b = best
+                if (b == null || t.triggerAtMs < b.triggerAtMs || (t.triggerAtMs == b.triggerAtMs && t.occurrenceMs < b.occurrenceMs)) best = t
+            }
+        }
+        return best
+    }
 
     /** 자정은 24:00 으로 표기 */
     fun label(sec: Int): String {
@@ -152,15 +196,19 @@ data class FormState(
     val already: String = "",
     val soldout: String = "",
     val refreshOnMiss: Boolean = true,
-    /** 매일 반복되는 회차 시각(쉼표 구분, 24시간제, 24:00 = 자정) */
+    /** 매일 반복되는 회차 시각(쉼표 구분, 24시간제, 24:00 = 자정). 개수 제한 없음 */
     val slots: String = Schedule.DEFAULT_SLOTS,
-    /** 선택한 회차: "auto"(다음 회차 자동) 또는 슬롯 문자열(예: "18:00") */
-    val slot: String = Schedule.AUTO,
+    /** slots 중 꺼 둔(사용 안 함) 시각 */
+    val slotsOff: String = "",
+    /** 켜진 회차가 되면 매일 자동 실행 (+ 1분 전 잠금 해제 알람) */
+    val autoRun: Boolean = false,
+    /** 자동 실행 알람을 회차 몇 초 전에 울릴지 (20~600) */
+    val warnSec: String = "60",
     /** 클릭 위치 표시(빨간 점) */
     val showDots: Boolean = true,
 ) {
     /**
-     * openAt 이 있으면 그 날짜/시각을, 없으면 slots/slot 에서 다음 오픈 시각을 계산한다.
+     * openAt 이 있으면 그 날짜/시각을, 없으면 켜진 회차(slots - slotsOff) 중 다음 오픈 시각을 계산한다.
      * (UI 는 회차 방식만 사용하고 openAt 은 비워 둔다)
      */
     fun toJob(requireOpenAt: Boolean, nowMs: Long = System.currentTimeMillis(), requireCoupons: Boolean = true): Parsed {
@@ -182,8 +230,8 @@ data class FormState(
                 return Parsed(null, "오픈 시각 형식 오류 — 예: 2026-11-05 10:00:00")
             }
             !requireOpenAt -> 0L
-            else -> Schedule.nextOpen(Schedule.parseSlots(slots), slot, nowMs)
-                ?: return Parsed(null, "회차 시각이 없거나 형식 오류 — 예: 12:00, 18:00, 24:00")
+            else -> Schedule.nextOpen(Schedule.enabled(slots, slotsOff), Schedule.AUTO, nowMs)
+                ?: return Parsed(null, "켜진 회차 시각이 없습니다 — 시각을 추가하거나 켜 주세요 (예: 12:00, 18:00, 24:00)")
         }
         return Parsed(
             Job(
