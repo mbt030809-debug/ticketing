@@ -18,7 +18,7 @@ object DebugReport {
         return buildString {
             appendLine("== 쿠폰 매크로 디버그 리포트 ==")
             appendLine("앱 ${env.appVersion} · 기기 ${env.device} · 안드로이드 API ${env.sdk}")
-            appendLine("접근성 서비스: ${if (env.accessibilityOn) "켜짐" else "꺼짐"} · 실행 중: ${if (env.running) "예" else "아니오"} · OCR: ${if (env.sdk >= 30) "가능" else "불가(안드로이드 11 미만)"}")
+            appendLine("접근성 서비스: ${if (env.accessibilityOn) "켜짐" else "꺼짐"} · 실행 중: ${if (env.running) "예" else "아니오"}")
             appendLine("이벤트: $profileLabel · 앱: ${form.pkg.ifBlank { "(미지정)" }}")
             appendLine("회차: 전체 [$all] / 켜짐 [$on] · 자동 실행: ${if (form.autoRun) "켜짐(알람 ${form.warnSec}초 전)" else "꺼짐"}")
             appendLine("예약 흐름: ${if (form.routeAtOpen) "오픈 ${form.launchLeadSec}초 전 앱 실행 → 정각 경로 이동" else "미리 이동 후 대기"} · 새로고침 ${if (form.refreshOnMiss) "사용" else "안 함"} · 클릭 점 ${if (form.showDots) "표시" else "숨김"}")

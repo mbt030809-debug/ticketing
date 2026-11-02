@@ -33,7 +33,6 @@ class FlowTest {
         assertTrue(p.replayRoute)
         assertTrue(p.waitForOpen)
         assertFalse("정각 이동은 단계마다 로딩을 기다리지 않는다(속도 우선)", p.waitLoadedBetweenSteps)
-        assertFalse(p.prelocateOcr)
         assertFalse(p.preRefresh)
     }
 
@@ -79,7 +78,6 @@ class FlowTest {
         val p = Flow.plan(job(route, routeAtOpen = false), Mode.LIVE, appInFront = false)
         assertFalse(p.atOpen)
         assertTrue(p.waitLoadedBetweenSteps)
-        assertTrue(p.prelocateOcr)
         assertTrue(p.preRefresh)
         assertTrue(p.waitForOpen)
         assertFalse(Flow.plan(job(route, routeAtOpen = false, refresh = false), Mode.LIVE, false).preRefresh)

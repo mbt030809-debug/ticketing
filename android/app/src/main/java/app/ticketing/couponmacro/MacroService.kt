@@ -8,8 +8,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
-import android.annotation.SuppressLint
-import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.graphics.Path
@@ -20,12 +18,10 @@ import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
-import android.view.Display
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -36,10 +32,6 @@ import android.view.MotionEvent
 import android.widget.FrameLayout
 import kotlin.math.roundToInt
 import java.text.SimpleDateFormat
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import java.util.Date
 import java.util.Locale
 
@@ -56,14 +48,13 @@ class MacroService : AccessibilityService() {
         var instance: MacroService? = null
         private const val CHANNEL = "result"
         private const val MAX_POS_CLICKS = 60
-        private val OCR_UI_NOISE = listOf("쿠폰 목록 읽기", "위치로 찍기", "글자 있는 쿠폰", "이미지 쿠폰", "쿠폰 카드를 터치", "받을 쿠폰을 고르세요", "선택 완료")
         private val POPUP_WORDS = listOf("닫기", "나중에", "다음에", "건너뛰기", "취소", "오늘 하루 보지 않기", "확인")
     }
 
     @Volatile private var worker: Thread? = null
     @Volatile private var cancelled = false
     @Volatile private var dots = true
-    @Volatile private var baseline: Set<String>? = null   // 위치 탭 결과 판별용: 클릭 전 화면 문구
+    @Volatile private var baselineProbe: Map<String, Int>? = null   // 위치 탭 결과 판별용: 탭 전부터 보이던 결과 문구 개수
     @Volatile private var lastToast = ""
     @Volatile private var lastToastAt = 0L
     private var overlay: View? = null
@@ -345,16 +336,8 @@ class MacroService : AccessibilityService() {
         }
         val rules = rulesFor(job)
         val buttons = CouponMatcher.findButtons(AxNode(root), rules)
-        var items = CouponMatcher.listCards(buttons, rules)
+        val items = CouponMatcher.listCards(buttons, rules)
         LogStore.add("받기 버튼 ${buttons.size}개 · 쿠폰 후보 ${items.size}개")
-        if (items.isEmpty() && ocrSupported()) {
-            // 접근성에 글자가 없는 이미지 쿠폰: OCR 로 금액/할인율 줄을 찾아 후보로
-            val lines = ocrLines(0)
-            if (lines != null) {
-                items = OcrMatcher.couponCandidates(lines, dp(420))
-                LogStore.add("OCR 로 읽은 문구 ${lines.size}줄 · 이미지 쿠폰 후보 ${items.size}개")
-            }
-        }
         main.post {
             if (items.isEmpty()) {
                 notifyResult("쿠폰 목록", "받기 버튼을 찾지 못했습니다. 쿠폰 페이지인지, 고급 설정의 '받기 버튼 문구'를 확인하세요")
@@ -517,18 +500,7 @@ class MacroService : AccessibilityService() {
                 fx, fy,
             )
         } else {
-            // 접근성에 글자가 없는 화면(이미지): OCR 로 읽어서 바로 위의 유일한 글자를 기준점으로
-            val a = ocrLines(0)?.let { OcrMatcher.findAnchor(it, y.toInt(), dp(320)) }
-            if (a != null) {
-                PosTarget(
-                    a.text.trim(),
-                    ((x - a.left) / dm.density).roundToInt(),
-                    ((y - a.top) / dm.density).roundToInt(),
-                    fx, fy, ocr = true,
-                )
-            } else {
-                PosTarget("", 0, 0, fx, fy)
-            }
+            PosTarget("", 0, 0, fx, fy) // 기준으로 삼을 글자가 없으면 화면 비율 위치
         }
         val n = synchronized(capturePoints) {
             capturePoints += pt
@@ -615,7 +587,7 @@ class MacroService : AccessibilityService() {
             if (waitLoaded) {
                 sleep(300)
                 waitForLoaded(job, "이동 ${i + 1}") // 다음 단계/쿠폰 선택은 화면 로딩이 끝난 뒤에
-            } else {
+            } else if (i < job.steps.lastIndex) {
                 sleep(120) // 다음 단계 대상이 나타날 때까지는 waitAndClick 이 기다린다
             }
         }
@@ -657,18 +629,13 @@ class MacroService : AccessibilityService() {
         waitUntil(fireAt, offset)
         LogStore.add("정각 — 경로 이동 시작")
         if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps)?.let { return it }
-        // 쿠폰 페이지 로딩이 끝나길 잠깐(최대 4초, 0.5초 안정) 확인하고, 이때 읽은 화면을 결과 판별 기준으로 저장
-        waitForLoaded(job, "이동 완료", maxMs = 4_000, quietMs = 500)
-        lastPageTexts?.let { baseline = it }
+        // 쿠폰 이미지/카드가 화면에 뜨는 즉시 선택한다 (별도 로딩 대기 없음: 클릭 루프가 대상이 보일 때까지 빠르게 확인)
+        LogStore.add("경로 이동 끝 — 쿠폰 선택 시작")
         return clickLoop(job, Mode.LIVE)
     }
 
     private fun execute(job: Job, mode: Mode): Outcome {
-        baseline = null
-        baselineOcr = null
-        ocrPoints.clear()
-        ocrCache = null
-        LogStore.add(if (ocrSupported()) "OCR 사용 가능 — 접근성에 글자가 없는 이미지 속 글자도 읽습니다" else "OCR 불가(안드로이드 11 이상 필요) — 접근성 문구로만 찾습니다")
+        baselineProbe = null
         var offset = 0L
         if (mode == Mode.LIVE) {
             val o = Ntp.offsetMs()
@@ -734,11 +701,6 @@ class MacroService : AccessibilityService() {
             val fmt = SimpleDateFormat("MM-dd HH:mm:ss", Locale.KOREA)
             LogStore.add("대기: 오픈 ${fmt.format(Date(job.openAtMillis))} (lead ${job.leadMs}ms)")
             val fireAt = Flow.timeline(job).fireAtMs
-            // 이미지 쿠폰은 오픈 8초 전쯤 OCR 로 위치를 미리 계산해 둔다 (오픈 순간엔 계산 없이 바로 탭)
-            if (plan.prelocateOcr && ocrSupported()) {
-                if (fireAt - (System.currentTimeMillis() + offset) > 9_000) waitUntil(fireAt - 8_000, offset)
-                prelocate(job)
-            }
             // 오래 전에 열어 둔 페이지는 낡았을 수 있어 오픈 3초 전에 한 번 새로고침
             if (plan.preRefresh && fireAt - (System.currentTimeMillis() + offset) > 3500) {
                 waitUntil(fireAt - 3000, offset)
@@ -748,10 +710,10 @@ class MacroService : AccessibilityService() {
                     waitForLoaded(job, "새로고침", maxMs = 8_000, untilMs = fireAt, offset = offset)
                 }
             }
-            // 위치(이미지) 쿠폰은 결과를 '클릭 전엔 없던 새 문구'로 판별하므로, 오픈 1.5초 전 화면을 기준으로 저장
-            if ((job.coupons.any { PosTarget.isPos(it) } || ocrPoints.isNotEmpty()) && fireAt - (System.currentTimeMillis() + offset) > 2500) {
+            // 위치(이미지) 쿠폰은 결과를 '탭 전엔 없던 결과 문구'로 판별하므로, 오픈 1.5초 전 화면을 기준으로 저장
+            if (job.coupons.any { PosTarget.isPos(it) } && fireAt - (System.currentTimeMillis() + offset) > 2500) {
                 waitUntil(fireAt - 1500, offset)
-                targetRoot(job)?.let { baseline = snapshotTexts(it) }
+                targetRoot(job)?.let { baselineProbe = resultProbe(it, rulesFor(job)) }
             }
             waitUntil(fireAt, offset)
         } else {
@@ -786,16 +748,7 @@ class MacroService : AccessibilityService() {
                         }
                         continue
                     }
-                    val m = CouponMatcher.resolve(entry, { t -> findNodes(root, t) }, rules)
-                    if (m == null) {
-                        // 접근성에 글자가 없는 이미지 쿠폰: OCR 로 읽어서 그 위치를 탭
-                        if (ocrSupported() &&
-                            handleOcrText(job, mode, rules, attempt, entry, posStates.getOrPut(entry) { PosState() }, done)
-                        ) {
-                            foundAny = true
-                        }
-                        continue
-                    }
+                    val m = CouponMatcher.resolve(entry, { t -> findNodes(root, t) }, rules) ?: continue
                     foundAny = true
                     when {
                         m.button != null -> {
@@ -847,7 +800,7 @@ class MacroService : AccessibilityService() {
                     }
                 }
             }
-            sleep(job.intervalMs)
+            sleep(if (foundAny) job.intervalMs else minOf(job.intervalMs, 60L))
         }
         val missing = job.coupons.filter { it !in done }
         val partial = if (done.isEmpty()) "" else summarize(job, done, maxAttempts).detail + " · "
@@ -857,48 +810,28 @@ class MacroService : AccessibilityService() {
     private class PosState {
         var clicks = 0
         var lastAt = 0L
-        var misses = 0 // 대상을 못 찾은 횟수
     }
 
     private fun shown(entry: String): String =
         PosTarget.parse(entry)?.let { "위치(${it.anchor.ifEmpty { "화면 비율" }})" } ?: entry
 
-    /** 위치로 지정한 쿠폰 처리 (기준 문구는 접근성 → 안 보이면 OCR) */
+    /** 위치로 지정한 쿠폰: 기준 문구(접근성)가 보이면 그 기준 + 상대 위치를 즉시 탭 */
     private fun handlePos(
         job: Job, mode: Mode, rules: CouponRules, root: AccessibilityNodeInfo, attempt: Int,
         entry: String, pos: PosTarget, st: PosState, done: MutableMap<String, String>,
-    ): Boolean = handleTap(job, mode, rules, attempt, entry, st, done) {
-        ocrPoints[entry] ?: resolvePos(root, pos, useOcr = ocrAllowed(mode, st))
-    }
-
-    /** 접근성에 글자가 없는 쿠폰 문구를 OCR 로 찾아 탭 */
-    private fun handleOcrText(
-        job: Job, mode: Mode, rules: CouponRules, attempt: Int, entry: String, st: PosState, done: MutableMap<String, String>,
-    ): Boolean = handleTap(job, mode, rules, attempt, entry, st, done) {
-        ocrPoints[entry] ?: run {
-            if (!ocrAllowed(mode, st)) {
-                null
-            } else {
-                val p = ocrLines(maxAgeMs = 1_500)?.let { ocrPoint(entry, it) }
-                if (p != null) ocrPoints[entry] = p
-                p
-            }
-        }
-    }
-
-    /** 예약 실행 중 오픈 직후 접근성으로 곧 보일 수 있으니 처음 두 번은 OCR 없이 기다린다. 테스트는 바로 OCR. */
-    private fun ocrAllowed(mode: Mode, st: PosState): Boolean = ocrSupported() && (mode != Mode.LIVE || st.misses >= 2)
+    ): Boolean = handleTap(job, mode, rules, attempt, entry, st, done) { resolvePos(root, pos) }
 
     /**
-     * 좌표 하나를 반복 탭하는 공통 처리. 화면에서 대상 좌표를 얻었으면 true.
-     * 결과(성공/이미/소진)는 토스트, 클릭 전 화면에 없던 새 문구(접근성/OCR)로 판별한다.
+     * 좌표 하나를 반복 탭하는 처리. 화면에서 대상 좌표를 얻었으면 true.
+     * 결과(성공/이미/소진)는 토스트, 또는 탭 전엔 없던 결과 문구(개수 증가)로 판별한다.
+     * 첫 탭을 늦추지 않도록 '기준 화면'은 첫 탭을 보낸 직후(서버 응답 전)에 저장한다.
      */
     private fun handleTap(
         job: Job, mode: Mode, rules: CouponRules, attempt: Int, entry: String,
-        st: PosState, done: MutableMap<String, String>, resolve: () -> Triple<Float, Float, String>?,
+        st: PosState, done: MutableMap<String, String>, resolve: () -> Pair<Float, Float>?,
     ): Boolean {
         if (st.clicks > 0) {
-            val r = posResult(job, rules, st.lastAt, deep = st.clicks % 3 == 0)
+            val r = posResult(job, rules, st.lastAt)
             if (r != null) {
                 done[entry] = r
                 LogStore.add("[${shown(entry)}] → ${label(r)}")
@@ -910,29 +843,20 @@ class MacroService : AccessibilityService() {
                 return true
             }
         }
-        val pt = resolve()
-        if (pt == null) {
-            st.misses++
-            return false
-        }
+        val pt = resolve() ?: return false
         if (mode == Mode.DRY) {
             done[entry] = "dry_run"
             showDot(pt.first, pt.second, Color.GREEN)
-            LogStore.add("[${shown(entry)}] ${pt.third}로 위치 확인 → (${pt.first.toInt()}, ${pt.second.toInt()}) 탭 예정, 클릭 생략 (초록 점 위치 확인)")
+            LogStore.add("[${shown(entry)}] 탭 예정 위치 (${pt.first.toInt()}, ${pt.second.toInt()}) — 클릭 생략 (초록 점 위치 확인)")
             return true
-        }
-        if (baseline == null) targetRoot(job)?.let { baseline = snapshotTexts(it) }
-        if (baselineOcr == null && ocrSupported()) {
-            // 위치를 OCR 로 찾았다면 그때 읽은 화면이 곧 '클릭 전 기준' (예약 실행에선 추가 OCR 로 지연시키지 않음)
-            val src = ocrCache?.second ?: if (mode != Mode.LIVE) ocrLines(0) else null
-            baselineOcr = src?.map { OcrMatcher.norm(it.text) }?.toSet()
         }
         val ok = gesture(pt.first, pt.second, pt.first, pt.second, 40)
         if (ok) {
             st.clicks++
             st.lastAt = SystemClock.elapsedRealtime()
             showDot(pt.first, pt.second, Color.RED)
-            LogStore.add("#$attempt [${shown(entry)}] 탭 ${st.clicks}회 (${pt.first.toInt()}, ${pt.second.toInt()}, ${pt.third})")
+            LogStore.add("#$attempt [${shown(entry)}] 탭 ${st.clicks}회 (${pt.first.toInt()}, ${pt.second.toInt()})")
+            if (baselineProbe == null) targetRoot(job)?.let { baselineProbe = resultProbe(it, rules) }
             if (!job.hasResultTexts) done[entry] = "clicked"
         } else {
             LogStore.add("#$attempt [${shown(entry)}] 탭 실패")
@@ -940,166 +864,43 @@ class MacroService : AccessibilityService() {
         return true
     }
 
-    /** 기준 문구 + 상대 위치(dp) -> (x, y, 찾은 방법). 기준 문구가 지정됐는데 못 찾으면 null(아직 못 찾음). */
-    private fun resolvePos(root: AccessibilityNodeInfo, p: PosTarget, useOcr: Boolean): Triple<Float, Float, String>? {
+    /** 기준 문구 + 상대 위치(dp) -> 화면 좌표. 기준 문구가 지정됐는데 안 보이면 null(아직 못 찾음) */
+    private fun resolvePos(root: AccessibilityNodeInfo, p: PosTarget): Pair<Float, Float>? {
         val dm = resources.displayMetrics
-        val pt: Triple<Float, Float, String> = if (p.anchor.isEmpty()) {
-            Triple(p.fx * dm.widthPixels, p.fy * dm.heightPixels, "화면 비율")
+        val pt: Pair<Float, Float> = if (p.anchor.isEmpty()) {
+            (p.fx * dm.widthPixels) to (p.fy * dm.heightPixels)
         } else {
-            val a = if (p.ocr) null else root.findAccessibilityNodeInfosByText(p.anchor).firstOrNull { it.isVisibleToUser }
-            if (a != null) {
-                val r = Rect()
-                a.getBoundsInScreen(r)
-                Triple(r.left + p.dxDp * dm.density, r.top + p.dyDp * dm.density, "접근성")
-            } else if (useOcr) {
-                val line = ocrLines(maxAgeMs = 1_500)?.let { OcrMatcher.findLine(it, p.anchor) } ?: return null
-                Triple(line.left + p.dxDp * dm.density, line.top + p.dyDp * dm.density, "OCR")
-            } else {
-                return null
-            }
+            val a = root.findAccessibilityNodeInfosByText(p.anchor).firstOrNull { it.isVisibleToUser } ?: return null
+            val r = Rect()
+            a.getBoundsInScreen(r)
+            (r.left + p.dxDp * dm.density) to (r.top + p.dyDp * dm.density)
         }
         if (pt.first < 0 || pt.second < 0 || pt.first > dm.widthPixels || pt.second > dm.heightPixels) return null
         return pt
     }
 
-    /** OCR 줄 목록에서 entry(위치 또는 쿠폰 문구)의 탭 좌표. 못 찾으면 null */
-    private fun ocrPoint(entry: String, lines: List<OcrLine>): Triple<Float, Float, String>? {
-        val dm = resources.displayMetrics
-        val pos = PosTarget.parse(entry)
-        val pt: Triple<Float, Float, String> = if (pos != null) {
-            if (pos.anchor.isEmpty()) return null
-            val l = OcrMatcher.findLine(lines, pos.anchor) ?: return null
-            Triple(l.left + pos.dxDp * dm.density, l.top + pos.dyDp * dm.density, "OCR")
-        } else {
-            val l = OcrMatcher.resolve(lines, entry, dp(420)) ?: return null
-            Triple(l.cx, l.cy, "OCR")
-        }
-        if (pt.first < 0 || pt.second < 0 || pt.first > dm.widthPixels || pt.second > dm.heightPixels) return null
-        return pt
-    }
-
-    private fun posResult(job: Job, rules: CouponRules, clickedAt: Long, deep: Boolean): String? {
+    private fun posResult(job: Job, rules: CouponRules, clickedAt: Long): String? {
         val toast = if (lastToastAt >= clickedAt) lastToast else ""
         if (toast.isNotEmpty()) CouponMatcher.classify(toast, rules, 80)?.let { return it }
-        if (!deep) return null
-        val base = baseline
-        val root = targetRoot(job)
-        if (base != null && root != null) {
-            for (t in snapshotTexts(root)) {
-                if (t !in base) CouponMatcher.classify(t, rules)?.let { return it }
-            }
-        }
-        // 이미지로 바뀌는 결과 문구는 OCR 로 (클릭 전 화면에 없던 줄만)
-        val ob = baselineOcr
-        if (ob != null && ocrSupported()) {
-            val lines = ocrLines(0)
-            if (lines != null) {
-                for (l in lines) {
-                    if (OcrMatcher.norm(l.text) !in ob) CouponMatcher.classify(l.text, rules)?.let { return it }
-                }
-            }
-        }
-        return null
-    }
-
-    /** 오픈 전에 OCR 로 쿠폰 위치를 미리 계산해 두고, 결과 판별용 기준 화면도 저장한다. */
-    private fun prelocate(job: Job) {
-        val root = targetRoot(job) ?: return
-        val rules = rulesFor(job)
-        val lines = ocrLines(0)
-        if (lines == null) {
-            LogStore.add("OCR 읽기 실패 — 접근성 문구로만 진행합니다")
-            return
-        }
-        baselineOcr = lines.map { OcrMatcher.norm(it.text) }.toSet()
-        LogStore.add("OCR로 읽은 문구 ${lines.size}줄")
-        for (e in job.coupons) {
-            val pos = PosTarget.parse(e)
-            val visibleByAccessibility = if (pos != null) {
-                pos.anchor.isEmpty() || (!pos.ocr && root.findAccessibilityNodeInfosByText(pos.anchor).any { it.isVisibleToUser })
-            } else {
-                CouponMatcher.resolve(e, { t -> findNodes(root, t) }, rules) != null
-            }
-            if (visibleByAccessibility) continue
-            val hit = ocrPoint(e, lines)
-            if (hit != null) {
-                ocrPoints[e] = hit
-                LogStore.add("[${shown(e)}] OCR로 위치 확인 → (${hit.first.toInt()}, ${hit.second.toInt()})")
-                showDot(hit.first, hit.second, Color.GREEN)
-            } else {
-                LogStore.add("[${shown(e)}] OCR로도 못 찾음 — 쿠폰 페이지가 맞는지 확인하세요")
-            }
+        val base = baselineProbe ?: return null
+        val root = targetRoot(job) ?: return null
+        val now = resultProbe(root, rules)
+        fun grew(texts: List<String>) = texts.any { (now[it] ?: 0) > (base[it] ?: 0) }
+        return when {
+            grew(rules.successTexts) -> "success"
+            grew(rules.alreadyTexts) -> "already"
+            grew(rules.soldoutTexts) -> "soldout"
+            else -> null
         }
     }
 
-    // ---- OCR: 화면 캡처 -> 글자 읽기 (안드로이드 11 이상) ----
-    private val ocrExecutor = Executors.newSingleThreadExecutor()
-    @Volatile private var ocrCache: Pair<Long, List<OcrLine>>? = null
-    private val ocrPoints = ConcurrentHashMap<String, Triple<Float, Float, String>>()
-    @Volatile private var baselineOcr: Set<String>? = null
-
-    private fun ocrSupported(): Boolean = Build.VERSION.SDK_INT >= 30
-
-    /** 화면을 OCR 한 결과. maxAgeMs 이내의 이전 결과가 있으면 재사용. 실패하면 null */
-    private fun ocrLines(maxAgeMs: Long = 0L): List<OcrLine>? {
-        if (!ocrSupported()) return null
-        val c = ocrCache
-        if (c != null && SystemClock.elapsedRealtime() - c.first <= maxAgeMs) return c.second
-        val bmp = captureScreen() ?: return null
-        return try {
-            // 이 앱이 띄운 안내 UI(버튼/안내문) 글자는 제외
-            val lines = OcrEngine.read(bmp).filter { l -> OCR_UI_NOISE.none { l.text.contains(it) } }
-            ocrCache = SystemClock.elapsedRealtime() to lines
-            lines
-        } catch (e: Exception) {
-            LogStore.add("OCR 실패: $e")
-            null
-        } finally {
-            bmp.recycle()
+    /** 결과 문구가 화면에 몇 개 보이는지(문구별). 전체 화면을 읽지 않고 문구마다 한 번씩만 조회해 빠르다. */
+    private fun resultProbe(root: AccessibilityNodeInfo, rules: CouponRules): Map<String, Int> {
+        val m = HashMap<String, Int>()
+        for (t in rules.successTexts + rules.alreadyTexts + rules.soldoutTexts) {
+            m[t] = root.findAccessibilityNodeInfosByText(t).count { it.isVisibleToUser }
         }
-    }
-
-    @SuppressLint("NewApi")
-    private fun captureScreen(): Bitmap? {
-        if (Build.VERSION.SDK_INT < 30) return null
-        repeat(2) { attempt ->
-            val latch = CountDownLatch(1)
-            var out: Bitmap? = null
-            var failCode = -1
-            takeScreenshot(
-                Display.DEFAULT_DISPLAY,
-                ocrExecutor,
-                object : AccessibilityService.TakeScreenshotCallback {
-                    override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
-                        try {
-                            val hb = result.hardwareBuffer
-                            val hw = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
-                            out = hw?.copy(Bitmap.Config.ARGB_8888, false)
-                            hw?.recycle()
-                            hb.close()
-                        } catch (e: Exception) {
-                            LogStore.add("화면 캡처 변환 실패: $e")
-                        } finally {
-                            latch.countDown()
-                        }
-                    }
-
-                    override fun onFailure(errorCode: Int) {
-                        failCode = errorCode
-                        latch.countDown()
-                    }
-                },
-            )
-            latch.await(4, TimeUnit.SECONDS)
-            if (out != null) return out
-            if (attempt == 0 && failCode == 3) { // 너무 자주 캡처(간격 제한) -> 잠깐 쉬고 한 번 더
-                Thread.sleep(500)
-            } else {
-                LogStore.add("화면 캡처 실패(코드 $failCode)")
-                return null
-            }
-        }
-        return null
+        return m
     }
 
     /** 화면에 보이는 모든 문구(text/contentDescription). 클릭 전후 비교용. */
@@ -1141,15 +942,8 @@ class MacroService : AccessibilityService() {
                 }
             }
             LogStore.add("화면에서 읽은 문구 ${texts.size}개: " + texts.take(12).joinToString(" | ") { it.take(14) })
-            if (ocrSupported()) {
-                val ol = ocrLines(0)
-                if (ol != null) {
-                    LogStore.add("OCR로 읽은 문구 ${ol.size}줄: " + ol.take(15).joinToString(" | ") { it.text.take(14) })
-                } else {
-                    LogStore.add("OCR 읽기 실패 (화면 캡처/글자 인식 실패)")
-                }
-            } else if (texts.size < 8) {
-                LogStore.add("읽히는 문구가 거의 없습니다 — 이미지 위주 화면이면 쿠폰을 [위치로 찍기]로 지정하세요 (OCR 은 안드로이드 11 이상)")
+            if (texts.size < 8) {
+                LogStore.add("읽히는 문구가 거의 없습니다 — 이미지 위주 화면이면 쿠폰을 [화면에서 고르기 → 위치로 찍기]로 지정하세요")
             }
         } catch (e: Exception) {
             LogStore.add("원인 분석 실패: $e")
@@ -1390,31 +1184,24 @@ class MacroService : AccessibilityService() {
         return false
     }
 
-    private class PageSig(val hash: Int, val loading: Boolean, val hasContent: Boolean, val texts: Set<String>)
-
-    /** 마지막으로 읽은 화면 문구 (로딩 대기 중 얻은 것 — 결과 판별용 기준 화면으로 재사용) */
-    @Volatile private var lastPageTexts: Set<String>? = null
+    private class PageSig(val hash: Int, val loading: Boolean, val hasContent: Boolean)
 
     /** 화면 내용 시그니처 + 로딩 표시(ProgressBar) 유무 */
     private fun pageSignature(root: AccessibilityNodeInfo): PageSig {
         var h = 17
         var loading = false
         var seen = 0
-        val texts = HashSet<String>()
         fun walk(n: AccessibilityNodeInfo) {
             if (seen++ >= 800) return
             val cls = n.className?.toString().orEmpty()
             if (cls.contains("ProgressBar") && n.isVisibleToUser) loading = true
             for (t in listOf(n.text?.toString(), n.contentDescription?.toString())) {
-                if (!t.isNullOrBlank()) {
-                    texts += t.trim()
-                    if (t.none { it.isDigit() }) h += t.hashCode()
-                }
+                if (!t.isNullOrBlank() && t.none { it.isDigit() }) h += t.hashCode()
             }
             for (i in 0 until n.childCount) n.getChild(i)?.let { walk(it) }
         }
         walk(root)
-        return PageSig(h, loading, seen >= 5, texts)
+        return PageSig(h, loading, seen >= 5)
     }
 
     /**
@@ -1441,7 +1228,6 @@ class MacroService : AccessibilityService() {
                 tracker.reset()
             } else {
                 val sig = pageSignature(root)
-                lastPageTexts = sig.texts
                 if (tracker.update(sig.hash, sig.loading, sig.hasContent, now)) {
                     if (announced) LogStore.add("화면 로딩 완료($why)")
                     return true

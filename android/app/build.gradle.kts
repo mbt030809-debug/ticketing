@@ -22,10 +22,6 @@ android {
         versionName = "0.1.$appVersionCode"
         // 앱 내 업데이트가 최신 릴리스를 조회할 저장소
         buildConfigField("String", "UPDATE_REPO", "\"mbt030809-debug/ticketing\"")
-        // OCR 모델 네이티브 라이브러리 용량을 줄이기 위해 실기기 ABI 만 포함
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
-        }
     }
 
     buildFeatures {
@@ -62,9 +58,6 @@ android {
 }
 
 dependencies {
-    // 이미지 속 글자 읽기(OCR): 한국어 모델 내장, 기기 안에서 처리(오프라인)
-    implementation("com.google.mlkit:text-recognition-korean:16.0.0")
-    implementation("com.google.android.gms:play-services-tasks:18.1.0")
     testImplementation("junit:junit:4.13.2")
     // JVM 단위 테스트에서 org.json 실제 구현 사용 (android.jar 스텁 대체)
     testImplementation("org.json:json:20240303")

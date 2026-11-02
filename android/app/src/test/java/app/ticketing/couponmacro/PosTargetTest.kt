@@ -38,14 +38,11 @@ class PosTargetTest {
     }
 
     @Test
-    fun ocrFlagRoundTripsAndOldEntriesStillParse() {
-        val p = PosTarget("오후 5시 오픈", 35, 120, 0.25f, 0.55f, ocr = true)
-        assertEquals("위치:오후 5시 오픈|35,120|0.2500,0.5500|o", p.toEntry())
-        assertEquals(p, PosTarget.parse(p.toEntry()))
-        assertTrue(p.describe().contains("OCR"))
-        // 예전 형식(3칸)은 ocr=false 로 읽힌다
-        val old = PosTarget.parse("위치:오후 5시 오픈|35,120|0.2500,0.5500")!!
-        assertEquals(false, old.ocr)
+    fun legacyTrailingMarkerFromOlderBuildsIsIgnored() {
+        // 이전 빌드가 붙이던 끝의 |o 표시가 있어도 같은 위치로 읽힌다 (저장된 쿠폰 목록 호환)
+        val p = PosTarget.parse("위치:오후 5시 오픈|35,120|0.2500,0.5500|o")
+        assertEquals(PosTarget("오후 5시 오픈", 35, 120, 0.25f, 0.55f), p)
+        assertEquals("위치:오후 5시 오픈|35,120|0.2500,0.5500", p!!.toEntry())
     }
 
     @Test

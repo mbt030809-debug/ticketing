@@ -31,7 +31,7 @@ class ScheduleTest {
 
     @Test
     fun parseSlotsSortsDedupsAndSkipsGarbage() {
-        assertEquals(listOf(0, 12 * 3600, 18 * 3600), Schedule.parseSlots("18:00, 12:00, 24:00, 12:00, 아무거나"))
+        assertEquals(listOf(12 * 3600, 18 * 3600, 0), Schedule.parseSlots("18:00, 12:00, 24:00, 12:00, 아무거나"))
     }
 
     @Test

@@ -47,7 +47,7 @@ class PickItem(val lines: List<String>, val keyword: String)
  */
 object CouponMatcher {
     private const val MAX_CLIMB = 8
-    private const val MAX_NODES = 400
+    private const val MAX_NODES = 200
     private const val MAX_SCAN_NODES = 3000
 
     /** 버튼/상태 문구는 짧다. 긴 설명문("선착순 마감 시 종료")은 버튼·상태로 보지 않는다. */

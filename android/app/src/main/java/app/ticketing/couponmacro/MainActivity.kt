@@ -143,8 +143,8 @@ class MainActivity : Activity() {
         root.addView(
             note(
                 "[화면에서 고르기]: 대상 앱이 열리고(기록한 경로로 이동), 쿠폰 페이지에서 화면 위 버튼을 누르세요.\n" +
-                    "· [쿠폰 목록 읽기] — 쿠폰 목록에서 받을 것만 체크. 글자가 이미지로 된 쿠폰은 OCR(글자 인식)로 읽어 '오후 5시 오픈+10,000원' 처럼 제안합니다.\n" +
-                    "· [위치로 찍기] — 카드를 직접 터치해 지정. 화면에 글자 정보가 없으면 OCR 로 바로 위의 제목 글자를 읽어 기준점으로 삼습니다. 페이지를 스크롤하지 않은 첫 화면에서 보이는 카드만 지정하세요.\n" +
+                    "· [쿠폰 목록 읽기] — 글자가 있는 쿠폰: 목록에서 받을 것만 체크\n" +
+                    "· [위치로 찍기] — 글자 없는 이미지 쿠폰(카드 전체가 그림): 받을 카드를 직접 터치. 바로 위의 유일한 글자(예: 제목)를 기준점으로 삼아, 페이지가 조금 밀려도 같은 카드를 누릅니다. 페이지를 스크롤하지 않은 첫 화면에서 보이는 카드만 지정하세요.\n" +
                     "직접 적을 땐 카드에 적힌 문구(예: 5,000원 할인)를 한 줄에 하나씩, 비슷한 쿠폰은 +로 이으세요 (예: 5,000원+3만원 이상). " +
                     "[고급 설정 → 진단 도구 → 찾기만]을 하면 누를 위치에 초록 점이 뜹니다.",
             ),
@@ -521,7 +521,7 @@ class MainActivity : Activity() {
         if (loading) return
         val off = Schedule.parseSlots(slotsOff).toMutableSet()
         if (on) off.remove(sec) else off.add(sec)
-        slotsOff = off.sorted().joinToString(", ") { Schedule.label(it) }
+        slotsOff = Schedule.sortDisplay(off.toList()).joinToString(", ") { Schedule.label(it) }
         saveCurrent()
         refreshNext()
     }
@@ -562,7 +562,7 @@ class MainActivity : Activity() {
             toast("이미 있는 시각입니다")
             return
         }
-        slotsText = (all + sec).sorted().joinToString(", ") { Schedule.label(it) }
+        slotsText = Schedule.sortDisplay(all + sec).joinToString(", ") { Schedule.label(it) }
         refreshSchedule()
         saveCurrent()
         refreshNext()

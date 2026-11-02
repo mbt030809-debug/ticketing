@@ -17,9 +17,16 @@ class AutoRunTest {
 
     @Test
     fun enabledSlotsExcludeTheOnesTurnedOff() {
-        assertEquals(listOf(0, h12), Schedule.enabled("12:00, 18:00, 24:00", "18:00"))
-        assertEquals(listOf(0, h12, h18), Schedule.enabled("12:00, 18:00, 24:00", ""))
+        assertEquals(listOf(h12, 0), Schedule.enabled("12:00, 18:00, 24:00", "18:00"))
+        assertEquals(listOf(h12, h18, 0), Schedule.enabled("12:00, 18:00, 24:00", ""))
         assertTrue(Schedule.enabled("12:00, 18:00", "12:00, 18:00").isEmpty())
+    }
+
+    @Test
+    fun displayOrderPutsMidnightLast() {
+        // 화면/리포트에서 24:00 이 맨 위에 오던 표시 버그 고정
+        assertEquals("12:00, 18:00, 24:00", Schedule.parseSlots("24:00, 18:00, 12:00").joinToString(", ") { Schedule.label(it) })
+        assertEquals(listOf(h12, h18, 0), Schedule.sortDisplay(listOf(0, h18, h12, h12)))
     }
 
     @Test

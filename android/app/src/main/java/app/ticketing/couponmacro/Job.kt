@@ -96,7 +96,10 @@ object Schedule {
     }
 
     /** 쉼표/줄바꿈 구분 문자열 -> 정렬·중복 제거된 슬롯(초). 잘못된 항목은 무시. */
-    fun parseSlots(s: String): List<Int> = Parse.list(s).mapNotNull { parseSlot(it) }.distinct().sorted()
+    fun parseSlots(s: String): List<Int> = sortDisplay(Parse.list(s).mapNotNull { parseSlot(it) })
+
+    /** 표시/저장 순서: 하루 흐름대로 (자정 24:00 은 맨 뒤) */
+    fun sortDisplay(slots: List<Int>): List<Int> = slots.distinct().sortedBy { if (it == 0) 24 * 3600 else it }
 
     /** 켜진 회차 = slots 중 off(꺼 둔 시각)를 뺀 것 */
     fun enabled(slots: String, off: String): List<Int> {

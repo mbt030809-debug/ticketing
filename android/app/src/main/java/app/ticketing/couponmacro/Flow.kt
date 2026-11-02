@@ -16,8 +16,6 @@ data class FlowPlan(
     val waitLoadedBetweenSteps: Boolean,
     /** 오픈 시각까지 기다릴지 (예약 실행만) */
     val waitForOpen: Boolean,
-    /** 오픈 전에 OCR 로 쿠폰 위치를 미리 계산할지 (미리 이동해 두는 방식만) */
-    val prelocateOcr: Boolean,
     /** 오픈 3초 전 새로고침 (미리 이동해 두는 방식만) */
     val preRefresh: Boolean,
     /** 쿠폰이 안 보일 때 화면을 아래로 당겨 새로고침 (예약 실행만 — 테스트 중에는 화면을 밀지 않는다) */
@@ -38,7 +36,6 @@ object Flow {
             replayRoute = hasRoute,
             waitLoadedBetweenSteps = !atOpen,
             waitForOpen = live,
-            prelocateOcr = live && !atOpen && job.coupons.isNotEmpty(),
             preRefresh = live && !atOpen && job.refreshOnMiss,
             pullRefreshOnMiss = live && job.refreshOnMiss,
         )
