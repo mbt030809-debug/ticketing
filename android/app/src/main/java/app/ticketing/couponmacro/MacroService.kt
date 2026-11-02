@@ -654,8 +654,9 @@ class MacroService : AccessibilityService() {
         // 예약 실행: 경로가 있으면 앱 첫 화면에서 새로 시작해 경로를 따라가고, 없으면 지금 화면 그대로 이어서 진행.
         // 테스트(즉시 실행/찾기만): 앱을 다시 시작하지 않고 지금 보던 화면에서 바로 시도한다.
         val live = mode == Mode.LIVE
-        val fresh = live && job.steps.isNotEmpty()
-        val needLaunch = if (live) job.launchApp else targetRoot(job) == null
+        val hasRoute = job.steps.isNotEmpty()
+        val fresh = hasRoute // 경로가 있으면 항상 앱 첫 화면에서 시작해 기록한 순서대로 따라간다 (즉시 실행/찾기만 포함)
+        val needLaunch = if (live) job.launchApp else (hasRoute || targetRoot(job) == null)
         if (needLaunch) {
             if (!launch(job.pkg, fresh)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
             LogStore.add(if (fresh) "앱 실행(첫 화면에서 시작): ${job.pkg}" else "앱을 앞으로 가져옴(현재 화면 유지): ${job.pkg}")
@@ -664,14 +665,14 @@ class MacroService : AccessibilityService() {
                 LogStore.add("대상 앱이 자동으로 열리지 않았습니다 (백그라운드 실행 제한일 수 있음) — 직접 열어 주세요")
                 Alerts.warn(this, "앱을 직접 열어 주세요", "${job.name}: 대상 앱이 자동으로 열리지 않았습니다. 앱을 열면 매크로가 이어서 진행합니다")
             }
-            waitForLoaded(job, "앱 시작")
+            waitForLoaded(job, "앱 시작", maxMs = 10_000)
         } else if (live) {
             LogStore.add("앱 실행 생략 — 대상 앱의 쿠폰 화면으로 직접 이동해 두세요")
         } else {
-            LogStore.add("테스트: 지금 보이는 화면에서 시도합니다 (경로 이동 없음)")
+            LogStore.add("테스트: 기록한 경로가 없어 지금 보이는 화면에서 시도합니다")
         }
 
-        if (live) {
+        if (hasRoute) {
             for ((i, s) in job.steps.withIndex()) {
                 val ok = waitAndClick(job, s.text, 10_000)
                 LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.text}' ${if (ok) "OK" else "못 찾음"}")
@@ -1349,8 +1350,9 @@ class MacroService : AccessibilityService() {
             if (seen++ >= 800) return
             val cls = n.className?.toString().orEmpty()
             if (cls.contains("ProgressBar") && n.isVisibleToUser) loading = true
-            h = h * 31 + (n.text?.toString()?.hashCode() ?: 0)
-            h = h * 31 + (n.contentDescription?.toString()?.hashCode() ?: 0)
+            for (t in listOf(n.text?.toString(), n.contentDescription?.toString())) {
+                if (!t.isNullOrBlank() && t.none { it.isDigit() }) h += t.hashCode()
+            }
             for (i in 0 until n.childCount) n.getChild(i)?.let { walk(it) }
         }
         walk(root)
@@ -1360,9 +1362,10 @@ class MacroService : AccessibilityService() {
     /**
      * 화면 로딩이 끝날 때까지 대기: 로딩 표시가 없고 내용이 1초간 변하지 않으면 완료.
      * 쿠폰 선택/클릭은 이 대기가 끝난 뒤에 한다. 제한 시간(maxMs)이나 untilMs(오픈 시각 등)를 넘기면 그대로 진행.
+     * 숫자가 들어간 문구(카운트다운·가격 등)는 계속 바뀌므로 안정 판정에서 제외한다.
      */
     private fun waitForLoaded(
-        job: Job, why: String, maxMs: Long = 15_000, untilMs: Long = Long.MAX_VALUE, offset: Long = 0L,
+        job: Job, why: String, maxMs: Long = 6_000, untilMs: Long = Long.MAX_VALUE, offset: Long = 0L,
     ): Boolean {
         val tracker = StabilityTracker(1_000)
         val start = SystemClock.elapsedRealtime()
