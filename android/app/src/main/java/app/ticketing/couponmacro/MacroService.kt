@@ -659,44 +659,94 @@ class MacroService : AccessibilityService() {
         }
     }
 
-    /** 기록한 이동 경로를 순서대로 따라간다. 실패하면 오류 결과, 성공이면 null. waitLoaded: 단계마다 화면 로딩 완료까지 대기 */
-    private fun replayRoute(job: Job, waitLoaded: Boolean, initialSig: Int? = null): Outcome? {
-        var sig: Int? = initialSig ?: targetRoot(job)?.let { pageSignature(it).hash }
+    /**
+     * 기록한 이동 경로를 순서대로 따라간다. 실패하면 오류 결과, 성공이면 null.
+     * 각 단계 뒤에는 '화면이 다 바뀔 때까지' 기다린 다음 다음 곳을 누른다(settleAfterStep):
+     * 사람이 기다렸던 시간은 항상 기다리고(화면이 안 바뀌는 곳 대비), 그 사이 화면이 바뀌기 시작했다면 로딩이 끝나 잠잠해질 때까지 더 기다린다.
+     * waitLoaded: (예전 방식) 마지막 이동 뒤 화면 로딩 완료까지 추가 대기
+     */
+    private fun replayRoute(job: Job, waitLoaded: Boolean, initial: PageSig? = null): Outcome? {
+        var cur: PageSig? = initial ?: targetRoot(job)?.let { pageSignature(it) }
+        val n = job.steps.size
         for ((i, s) in job.steps.withIndex()) {
             val ok = runStep(job, s, if (s.optional) 1_500 else 10_000)
-            LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.display()}' ${if (ok) "OK" else "못 찾음"}")
-            if (!ok && !s.optional) return Outcome("error", 0, "이동 단계 실패: ${s.display()}")
-            if (i < job.steps.lastIndex) {
-                // 사람이 다음 곳을 누르기까지 기다린 시간(최대 3초)을 따르되, 화면이 바뀌면 그보다 일찍 다음 탭
-                val wait = (job.steps[i + 1].delayMs ?: 600L).coerceIn(300L, 3_000L)
-                sig = waitAfterTap(job, sig, wait)
-            } else if (waitLoaded) {
-                sleep(300)
-                waitForLoaded(job, "이동 완료") // 다음 단계/쿠폰 선택은 화면 로딩이 끝난 뒤에
+            LogStore.add("이동 ${i + 1}/$n '${s.display()}' ${if (ok) "OK" else "못 찾음"}")
+            if (!ok) {
+                if (!s.optional) return Outcome("error", 0, "이동 단계 실패: ${s.display()}")
+                continue // 없어도 되는 단계(팝업 닫기 등)가 안 보이면 화면이 안 바뀌었으니 기다릴 것 없이 다음으로
             }
+            val last = i == n - 1
+            cur = settleAfterStep(job, cur, Settle.minWaitMs(job.steps.getOrNull(i + 1)?.delayMs, last), "이동 ${i + 1}/$n")
         }
+        if (waitLoaded && n > 0) waitForLoaded(job, "이동 완료") // 예전 방식: 쿠폰 선택은 화면 로딩이 끝난 뒤에
         return null
     }
 
     /**
-     * 탭 뒤 화면이 바뀔 때까지(최대 maxMs) 기다린다. 바뀌면 250ms 더 안정시킨 뒤 새 시그니처를 돌려주고,
-     * 안 바뀌면(이미지 화면 등) maxMs 를 채워 기다린 뒤 기존 값을 돌려준다.
+     * 탭 뒤 다음 동작을 해도 될 때까지 기다린다 (StepSettle 규칙: 최소 대기 + 바뀌기 시작했다면 다 바뀔 때까지).
+     * 마지막으로 읽은 화면을 돌려줘 다음 탭의 '탭 전 화면' 기준으로 쓴다.
      */
-    private fun waitAfterTap(job: Job, before: Int?, maxMs: Long): Int? {
-        val end = SystemClock.elapsedRealtime() + maxMs
-        while (SystemClock.elapsedRealtime() < end) {
+    private fun settleAfterStep(job: Job, before: PageSig?, minWaitMs: Long, why: String): PageSig? {
+        val start = SystemClock.elapsedRealtime()
+        val st = StepSettle(before?.hash, before?.loading ?: false, minWaitMs, minWaitMs + Settle.EXTRA_MS, Settle.QUIET_MS, start)
+        var last = before
+        while (true) {
             checkCancel()
-            val root = targetRoot(job)
-            if (root != null && before != null) {
-                val sig = pageSignature(root)
-                if (sig.hasContent && sig.hash != before) {
-                    sleep(250)
-                    return sig.hash
-                }
+            val now = SystemClock.elapsedRealtime()
+            val sig = targetRoot(job)?.let { pageSignature(it) }
+            if (sig != null) last = sig
+            if (st.ready(sig?.hash, sig?.loading ?: false, sig?.hasContent ?: false, now)) {
+                val took = now - start
+                LogStore.add(
+                    "  └ 화면 확인($why): ${took}ms 대기 · " + when {
+                        st.timedOut -> "계속 바뀌어 그대로 진행"
+                        st.changed -> "화면이 바뀐 뒤 안정됨"
+                        else -> "화면 변화 없음(기록한 대기 시간만 기다림)"
+                    },
+                )
+                return last
             }
             Thread.sleep(100)
         }
-        return before
+    }
+
+    /**
+     * 정각(fireAt)이 되고, 앱 첫 화면이 다 뜰 때까지(로딩 표시 없음 + 내용이 0.5초 안정) 기다린 뒤 돌아온다.
+     * 정각 전에는 계속 화면을 지켜보다가 정각에 이미 안정돼 있으면 바로 넘어가므로 첫 탭이 늦어지지 않는다.
+     * 정각이 지나도 안정되지 않으면 Settle.START_EXTRA_MS 까지만 더 기다리고 진행한다.
+     */
+    private fun waitScreenReady(job: Job, fireAt: Long, offset: Long): PageSig? {
+        if (fireAt - (System.currentTimeMillis() + offset) > 1_500) waitUntil(fireAt - 1_500, offset)
+        val tracker = StabilityTracker(Settle.QUIET_MS)
+        var last: PageSig? = null
+        var waitingLogged = false
+        while (true) {
+            checkCancel()
+            val nowMs = System.currentTimeMillis() + offset
+            val sig = targetRoot(job)?.let { pageSignature(it) }
+            val stable = if (sig == null) {
+                tracker.reset()
+                false
+            } else {
+                last = sig
+                tracker.update(sig.hash, sig.loading, sig.hasContent, SystemClock.elapsedRealtime())
+            }
+            if (nowMs >= fireAt) {
+                if (stable) {
+                    if (waitingLogged) LogStore.add("앱 화면 로딩 완료 — 경로 이동 시작 (정각보다 ${nowMs - fireAt}ms 늦음)")
+                    return last
+                }
+                if (nowMs >= fireAt + Settle.START_EXTRA_MS) {
+                    LogStore.add("앱 화면이 ${Settle.START_EXTRA_MS / 1000}초 넘게 안정되지 않아 그대로 진행")
+                    return last
+                }
+                if (!waitingLogged) {
+                    waitingLogged = true
+                    LogStore.add("정각이지만 앱 화면이 아직 로딩 중 — 다 뜰 때까지 기다립니다")
+                }
+            }
+            Thread.sleep(if (nowMs >= fireAt) 100L else minOf(100L, maxOf(1L, fireAt - nowMs)))
+        }
     }
 
     /**
@@ -754,15 +804,11 @@ class MacroService : AccessibilityService() {
             LogStore.add("앱 실행 생략 — 대상 앱의 시작 화면에 가 있어야 합니다")
         }
 
-        // 경로 첫 탭을 늦추지 않도록, 정각 1초 전에 현재 화면 시그니처를 저장해 둔다(탭 뒤 화면 변화 감지의 기준)
-        var sig0: Int? = null
-        if (plan.replayRoute && fireAt - (System.currentTimeMillis() + offset) > 1_500) {
-            waitUntil(fireAt - 1_000, offset)
-            sig0 = targetRoot(job)?.let { pageSignature(it).hash }
-        }
-        waitUntil(fireAt, offset)
+        // 정각까지 기다리되, 앱 첫 화면이 다 뜬 뒤에 경로를 시작한다 (로딩 중에 누르면 엉뚱한 화면으로 넘어감)
+        var start: PageSig? = null
+        if (plan.replayRoute) start = waitScreenReady(job, fireAt, offset) else waitUntil(fireAt, offset)
         LogStore.add(if (mode == Mode.LIVE) "정각 — 경로 이동 시작" else "앱 실행 후 ${(fireAt - launchAt) / 1000.0}초 경과 — 경로 이동 시작")
-        if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps, initialSig = sig0)?.let { return it }
+        if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps, initial = start)?.let { return it }
         // 쿠폰 이미지/카드가 화면에 뜨는 즉시 선택한다 (별도 로딩 대기 없음: 클릭 루프가 대상이 보일 때까지 빠르게 확인)
         LogStore.add("경로 이동 끝 — 쿠폰 선택 시작")
         return clickLoop(job, mode)
