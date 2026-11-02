@@ -255,11 +255,12 @@ class MacroService : AccessibilityService() {
         dots = job.showDots
         try {
             if (job.launchApp) {
-                if (!launch(job.pkg)) {
+                val fresh = job.steps.isNotEmpty() // 경로를 따라갈 때만 첫 화면에서 시작
+                if (!launch(job.pkg, fresh)) {
                     LogStore.add("앱 실행 실패: ${job.pkg}")
                     return
                 }
-                LogStore.add("쿠폰 고르기: 앱 실행")
+                LogStore.add(if (fresh) "쿠폰 고르기: 앱 실행(첫 화면에서 시작)" else "쿠폰 고르기: 앱을 앞으로 가져옴(현재 화면 유지)")
                 sleep(2000)
             }
             for ((i, s) in job.steps.withIndex()) {
@@ -618,25 +619,34 @@ class MacroService : AccessibilityService() {
             LogStore.add("잠금 해제 확인")
         }
 
-        if (job.launchApp) {
-            if (!launch(job.pkg)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
-            LogStore.add("앱 실행: ${job.pkg}")
+        // 예약 실행: 경로가 있으면 앱 첫 화면에서 새로 시작해 경로를 따라가고, 없으면 지금 화면 그대로 이어서 진행.
+        // 테스트(즉시 실행/찾기만): 앱을 다시 시작하지 않고 지금 보던 화면에서 바로 시도한다.
+        val live = mode == Mode.LIVE
+        val fresh = live && job.steps.isNotEmpty()
+        val needLaunch = if (live) job.launchApp else targetRoot(job) == null
+        if (needLaunch) {
+            if (!launch(job.pkg, fresh)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
+            LogStore.add(if (fresh) "앱 실행(첫 화면에서 시작): ${job.pkg}" else "앱을 앞으로 가져옴(현재 화면 유지): ${job.pkg}")
             sleep(1500)
             if (!waitForeground(job, 6_000)) {
                 LogStore.add("대상 앱이 자동으로 열리지 않았습니다 (백그라운드 실행 제한일 수 있음) — 직접 열어 주세요")
                 Alerts.warn(this, "앱을 직접 열어 주세요", "${job.name}: 대상 앱이 자동으로 열리지 않았습니다. 앱을 열면 매크로가 이어서 진행합니다")
             }
             waitForLoaded(job, "앱 시작")
-        } else {
+        } else if (live) {
             LogStore.add("앱 실행 생략 — 대상 앱의 쿠폰 화면으로 직접 이동해 두세요")
+        } else {
+            LogStore.add("테스트: 지금 보이는 화면에서 시도합니다 (경로 이동 없음)")
         }
 
-        for ((i, s) in job.steps.withIndex()) {
-            val ok = waitAndClick(job, s.text, 10_000)
-            LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.text}' ${if (ok) "OK" else "못 찾음"}")
-            if (!ok && !s.optional) return Outcome("error", 0, "이동 단계 실패: ${s.text}")
-            sleep(300)
-            waitForLoaded(job, "이동 ${i + 1}")   // 다음 단계/쿠폰 선택은 화면 로딩이 끝난 뒤에
+        if (live) {
+            for ((i, s) in job.steps.withIndex()) {
+                val ok = waitAndClick(job, s.text, 10_000)
+                LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.text}' ${if (ok) "OK" else "못 찾음"}")
+                if (!ok && !s.optional) return Outcome("error", 0, "이동 단계 실패: ${s.text}")
+                sleep(300)
+                waitForLoaded(job, "이동 ${i + 1}")   // 다음 단계/쿠폰 선택은 화면 로딩이 끝난 뒤에
+            }
         }
 
         if (mode == Mode.LIVE) {
@@ -732,7 +742,10 @@ class MacroService : AccessibilityService() {
                 if (root == null && misses % 20 == 1) LogStore.add("대상 앱(${job.pkg})이 전면에 없음")
                 if (root != null) {
                     if (misses % 3 == 1) dismissPopups(job, root)
-                    if (job.refreshOnMiss && misses % 5 == 0) {
+                    // 못 찾은 이유 (처음 한 번 + 가끔 다시)
+                    if (misses == 3 || misses % 40 == 0) explainMiss(job, root)
+                    // 화면을 당겨 새로고침하는 건 예약 실행에서만 (테스트 중 화면이 위로 밀리지 않도록)
+                    if (mode == Mode.LIVE && job.refreshOnMiss && misses % 8 == 0) {
                         swipeDown()
                         LogStore.add("#$attempt 쿠폰이 안 보임 → 새로고침")
                     }
@@ -834,6 +847,37 @@ class MacroService : AccessibilityService() {
         }
         walk(root)
         return out
+    }
+
+    /** 쿠폰을 못 찾을 때 이유를 로그에 남긴다: 문구가 화면에 있는지, 기준 문구가 보이는지, 화면에서 읽은 문구 샘플 */
+    private fun explainMiss(job: Job, root: AccessibilityNodeInfo) {
+        try {
+            val texts = snapshotTexts(root)
+            for (entry in job.coupons) {
+                val pos = PosTarget.parse(entry)
+                if (pos != null) {
+                    if (pos.anchor.isNotEmpty()) {
+                        val n = root.findAccessibilityNodeInfosByText(pos.anchor).count { it.isVisibleToUser }
+                        LogStore.add(
+                            "[${shown(entry)}] 기준 문구 '${pos.anchor}' " +
+                                if (n > 0) "${n}개 보임 (위치가 화면 밖이면 탭 못 함)" else "화면에 안 보임 — 쿠폰 페이지가 맞는지/스크롤 위치 확인",
+                        )
+                    }
+                } else {
+                    val term = CouponMatcher.terms(entry).firstOrNull() ?: continue
+                    val n = root.findAccessibilityNodeInfosByText(term).count { it.isVisibleToUser }
+                    LogStore.add(
+                        "[$entry] 문구 '$term' " +
+                            if (n > 0) "${n}개 보이나 쿠폰 카드/받기 버튼을 못 찾음 (고급 설정의 받기 버튼 문구 확인)"
+                            else "화면에 없음 — 이미지로 된 쿠폰이면 [화면에서 고르기 → 위치로 찍기]로 지정하세요",
+                    )
+                }
+            }
+            LogStore.add("화면에서 읽은 문구 ${texts.size}개: " + texts.take(12).joinToString(" | ") { it.take(14) })
+            if (texts.size < 8) LogStore.add("읽히는 문구가 거의 없습니다 — 이미지 위주 화면이면 쿠폰을 [위치로 찍기]로 지정하세요")
+        } catch (e: Exception) {
+            LogStore.add("원인 분석 실패: $e")
+        }
     }
 
     private fun summarize(job: Job, done: Map<String, String>, attempts: Int): Outcome {
@@ -1005,10 +1049,13 @@ class MacroService : AccessibilityService() {
         return dispatchGesture(g, null, null)
     }
 
-    private fun launch(pkg: String): Boolean {
+    /**
+     * 대상 앱을 앞으로 가져온다.
+     * fresh=true: 앱 첫 화면에서 새로 시작(경로 기록/재생의 출발점), false: 지금 보던 화면 그대로 이어서(현재 화면 유지).
+     */
+    private fun launch(pkg: String, fresh: Boolean = true): Boolean {
         val i = packageManager.getLaunchIntentForPackage(pkg) ?: return false
-        // 항상 앱 첫 화면에서 시작 (경로 기록 때와 같은 출발점)
-        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        i.addFlags(if (fresh) Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK else Intent.FLAG_ACTIVITY_NEW_TASK)
         startActivity(i)
         return true
     }
