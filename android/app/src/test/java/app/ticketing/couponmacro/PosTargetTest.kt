@@ -38,6 +38,17 @@ class PosTargetTest {
     }
 
     @Test
+    fun ocrFlagRoundTripsAndOldEntriesStillParse() {
+        val p = PosTarget("오후 5시 오픈", 35, 120, 0.25f, 0.55f, ocr = true)
+        assertEquals("위치:오후 5시 오픈|35,120|0.2500,0.5500|o", p.toEntry())
+        assertEquals(p, PosTarget.parse(p.toEntry()))
+        assertTrue(p.describe().contains("OCR"))
+        // 예전 형식(3칸)은 ocr=false 로 읽힌다
+        val old = PosTarget.parse("위치:오후 5시 오픈|35,120|0.2500,0.5500")!!
+        assertEquals(false, old.ocr)
+    }
+
+    @Test
     fun rejectsMalformedAndPlainTextEntries() {
         assertNull(PosTarget.parse("5,000원 할인"))
         assertNull(PosTarget.parse("위치:앵커|1,2"))
