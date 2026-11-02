@@ -81,6 +81,13 @@ class JobTest {
     }
 
     @Test
+    fun clickDotsDefaultOnAndCanBeDisabled() {
+        val base = FormState(pkg = "a.b", targets = "x", coupons = "c")
+        assertTrue(base.toJob(false).job!!.showDots)
+        assertFalse(base.copy(showDots = false).toJob(false).job!!.showDots)
+    }
+
+    @Test
     fun ntpTimestampParsing() {
         // 1970-01-01 + 10.5 s
         val secs = 2_208_988_800L + 10

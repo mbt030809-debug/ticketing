@@ -29,6 +29,8 @@ data class Job(
     val alreadyTexts: List<String>,
     val soldoutTexts: List<String>,
     val refreshOnMiss: Boolean,
+    /** 클릭한 위치에 빨간 점(찾기만: 초록 점)을 잠깐 표시 */
+    val showDots: Boolean,
 ) {
     val hasResultTexts: Boolean
         get() = successTexts.isNotEmpty() || alreadyTexts.isNotEmpty() || soldoutTexts.isNotEmpty()
@@ -154,6 +156,8 @@ data class FormState(
     val slots: String = Schedule.DEFAULT_SLOTS,
     /** 선택한 회차: "auto"(다음 회차 자동) 또는 슬롯 문자열(예: "18:00") */
     val slot: String = Schedule.AUTO,
+    /** 클릭 위치 표시(빨간 점) */
+    val showDots: Boolean = true,
 ) {
     /**
      * openAt 이 있으면 그 날짜/시각을, 없으면 slots/slot 에서 다음 오픈 시각을 계산한다.
@@ -199,6 +203,7 @@ data class FormState(
                 alreadyTexts = Parse.list(already),
                 soldoutTexts = Parse.list(soldout),
                 refreshOnMiss = refreshOnMiss,
+                showDots = showDots,
             ),
             null,
         )

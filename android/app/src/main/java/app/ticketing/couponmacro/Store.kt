@@ -35,6 +35,7 @@ object Store {
             .putBoolean("refreshOnMiss", f.refreshOnMiss)
             .putString("slots", f.slots)
             .putString("slot", f.slot)
+            .putBoolean("showDots", f.showDots)
             .commit()
     }
 
@@ -98,6 +99,7 @@ object Store {
             refreshOnMiss = p.getBoolean("refreshOnMiss", d.refreshOnMiss),
             slots = p.getString("slots", d.slots).orEmpty().ifBlank { d.slots },
             slot = p.getString("slot", d.slot).orEmpty().ifBlank { d.slot },
+            showDots = p.getBoolean("showDots", d.showDots),
         )
     }
 }

@@ -36,6 +36,7 @@ class MainActivity : Activity() {
     private val profileButtons = LinkedHashMap<String, Button>()
     private lateinit var launchCb: CheckBox
     private lateinit var refreshCb: CheckBox
+    private lateinit var dotsCb: CheckBox
     private lateinit var accStatus: TextView
     private lateinit var accBox: LinearLayout
     private lateinit var statusLine: TextView
@@ -139,7 +140,7 @@ class MainActivity : Activity() {
 
         // 접이식 메뉴
         collapsible(root, "테스트하기") { b ->
-            b.addView(note("쿠폰 페이지에서 먼저 시험해 보세요. 상시 받을 수 있는 쿠폰으로 연습하면 좋습니다."))
+            b.addView(note("쿠폰 페이지에서 먼저 시험해 보세요. 상시 받을 수 있는 쿠폰으로 연습하면 좋습니다.\n클릭이 나가면 그 자리에 빨간 점이 잠깐 뜹니다. [찾기만]은 누를 위치에 초록 점만 표시합니다."))
             b.addView(
                 row(
                     button("찾기만\n(클릭 안 함)") { run(Mode.DRY) },
@@ -173,6 +174,8 @@ class MainActivity : Activity() {
             field(b, K_WAIT, "클릭 후 결과 대기 (초)")
             refreshCb = CheckBox(this).apply { text = "새로고침 사용 (오픈 3초 전 1회 + 버튼이 안 보일 때 아래로 당김)" }
             b.addView(refreshCb)
+            dotsCb = CheckBox(this).apply { text = "클릭 위치를 빨간 점으로 표시 (찾기만: 초록 점)" }
+            b.addView(dotsCb)
             b.addView(button("이 이벤트 설정 초기화") { resetProfile() })
         }
 
@@ -560,6 +563,7 @@ class MainActivity : Activity() {
         success = f(K_SUCCESS), already = f(K_ALREADY), soldout = f(K_SOLDOUT),
         refreshOnMiss = refreshCb.isChecked,
         slots = slotsText, slot = slotSel,
+        showDots = dotsCb.isChecked,
     )
 
     private fun showForm(s: FormState) {
@@ -577,6 +581,7 @@ class MainActivity : Activity() {
         fields.getValue(K_ALREADY).setText(s.already)
         fields.getValue(K_SOLDOUT).setText(s.soldout)
         refreshCb.isChecked = s.refreshOnMiss
+        dotsCb.isChecked = s.showDots
         applySlots(s.slots, s.slot)
     }
 

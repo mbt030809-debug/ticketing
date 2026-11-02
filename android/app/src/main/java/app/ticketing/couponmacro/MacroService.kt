@@ -8,6 +8,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
@@ -46,6 +47,7 @@ class MacroService : AccessibilityService() {
 
     @Volatile private var worker: Thread? = null
     @Volatile private var cancelled = false
+    @Volatile private var dots = true
     @Volatile private var lastToast = ""
     @Volatile private var lastToastAt = 0L
     private var overlay: View? = null
@@ -241,6 +243,7 @@ class MacroService : AccessibilityService() {
     }
 
     private fun runPick(job: Job) {
+        dots = job.showDots
         try {
             if (job.launchApp) {
                 if (!launch(job.pkg)) {
@@ -427,6 +430,7 @@ class MacroService : AccessibilityService() {
 
     // ---- 작업 실행 ----
     private fun runJob(job: Job, mode: Mode) {
+        dots = job.showDots
         acquireWakeLock()
         setKeepScreenOn(true)
         try {
@@ -516,6 +520,7 @@ class MacroService : AccessibilityService() {
                         m.button != null -> {
                             if (mode == Mode.DRY) {
                                 done[entry] = "dry_run"
+                                showDotOn((m.button as AxNode).raw, Color.GREEN)
                                 LogStore.add("[$entry] 카드 발견 → 받기 버튼 확인, 클릭 생략 (카드: ${m.text.take(60)})")
                             } else {
                                 val t0 = SystemClock.elapsedRealtime()
@@ -647,6 +652,54 @@ class MacroService : AccessibilityService() {
 
     /** 클릭 가능한 노드(자신 또는 조상)에 ACTION_CLICK, 안 되면 중앙 좌표 탭. */
     private fun clickNode(node: AccessibilityNodeInfo): Boolean {
+        val ok = clickNodeRaw(node)
+        if (ok) showDotOn(node, Color.RED)
+        return ok
+    }
+
+    /** 노드 중앙에 점을 잠깐 표시 (클릭이 실제로 나갔는지 눈으로 확인용). 터치는 가로채지 않는다. */
+    private fun showDotOn(node: AccessibilityNodeInfo, color: Int) {
+        if (!dots) return
+        val r = Rect()
+        node.getBoundsInScreen(r)
+        if (r.isEmpty) return
+        showDot(r.exactCenterX(), r.exactCenterY(), color)
+    }
+
+    private fun showDot(cx: Float, cy: Float, argb: Int) {
+        main.post {
+            try {
+                val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                val size = dp(28)
+                val v = View(this).apply {
+                    background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(argb)
+                        setStroke(dp(2), Color.WHITE)
+                    }
+                    alpha = 0.9f
+                }
+                val lp = WindowManager.LayoutParams(
+                    size, size,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT,
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.START
+                    x = (cx - size / 2f).toInt()
+                    y = (cy - size / 2f).toInt()
+                }
+                wm.addView(v, lp)
+                main.postDelayed({ runCatching { wm.removeView(v) } }, 800)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun clickNodeRaw(node: AccessibilityNodeInfo): Boolean {
         var n: AccessibilityNodeInfo? = node
         var depth = 0
         while (n != null && depth < 6) {
