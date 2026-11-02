@@ -38,6 +38,7 @@ class MainActivity : Activity() {
     private lateinit var launchCb: CheckBox
     private lateinit var refreshCb: CheckBox
     private lateinit var dotsCb: CheckBox
+    private lateinit var routeAtOpenCb: CheckBox
     private lateinit var accStatus: TextView
     private lateinit var accBox: LinearLayout
     private lateinit var statusLine: TextView
@@ -169,7 +170,7 @@ class MainActivity : Activity() {
         root.addView(statusLine)
         root.addView(
             note(
-                "[예약 시작]: 켜진 다음 회차 시각에 맞춰 대기했다가 누릅니다 (실행 중에는 [중지]로 바뀜). " +
+                "[예약 시작]: 켜진 다음 회차에 맞춰 — 오픈 5초 전 앱 실행 → 정각에 경로 이동 → 쿠폰 받기 (시점은 고급 설정에서 변경, 실행 중에는 [중지]로 바뀜). " +
                     "[즉시 실행]: 기다리지 않고 지금 바로 시도합니다 — 기록한 경로가 있으면 앱을 첫 화면부터 시작해 경로를 따라간 뒤 시도하고, 경로가 없으면 지금 보던 화면에서 시도합니다. 상시 받을 수 있는 쿠폰으로 연습하세요. 클릭이 나가면 빨간 점이 잠깐 뜹니다.",
             ),
         )
@@ -187,6 +188,9 @@ class MainActivity : Activity() {
             field(b, K_ALREADY, "이미 받음 문구")
             field(b, K_SOLDOUT, "소진 문구")
             field(b, K_POPUPS, "자동으로 닫을 팝업 버튼 문구")
+            routeAtOpenCb = CheckBox(this).apply { text = "경로 이동을 오픈 정각에 시작 (끄면 미리 이동해 두고 대기)" }
+            b.addView(routeAtOpenCb)
+            field(b, K_LAUNCH, "앱 실행 시점: 오픈 몇 초 전 (0~600, 기본 5)")
             field(b, K_WARN, "자동 실행 알람: 회차 몇 초 전에 울릴지 (20~600, 기본 60)")
             field(b, K_LEAD, "미리 누르기 lead (ms)")
             field(b, K_INTERVAL, "재시도 간격 (ms)")
@@ -682,6 +686,7 @@ class MainActivity : Activity() {
         refreshOnMiss = refreshCb.isChecked,
         slots = slotsText, slotsOff = slotsOff,
         autoRun = autoCb.isChecked, warnSec = f(K_WARN),
+        routeAtOpen = routeAtOpenCb.isChecked, launchLeadSec = f(K_LAUNCH),
         showDots = dotsCb.isChecked,
     )
 
@@ -704,6 +709,8 @@ class MainActivity : Activity() {
         refreshCb.isChecked = s.refreshOnMiss
         dotsCb.isChecked = s.showDots
         fields.getValue(K_WARN).setText(s.warnSec)
+        fields.getValue(K_LAUNCH).setText(s.launchLeadSec)
+        routeAtOpenCb.isChecked = s.routeAtOpen
         autoCb.isChecked = s.autoRun
         applySlots(s.slots, s.slotsOff)
         } finally {
@@ -788,6 +795,7 @@ class MainActivity : Activity() {
         private const val K_PKG = "pkg"
         private const val K_LEAD = "leadMs"
         private const val K_WARN = "warnSec"
+        private const val K_LAUNCH = "launchLeadSec"
         private const val K_INTERVAL = "intervalMs"
         private const val K_ATTEMPTS = "maxAttempts"
         private const val K_WAIT = "resultWaitSec"

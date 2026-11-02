@@ -88,6 +88,25 @@ class JobTest {
     }
 
     @Test
+    fun reservedFlowDefaultsToLaunchFiveSecondsBeforeAndRouteAtOpen() {
+        val job = FormState(pkg = "a.b", targets = "x", coupons = "c").toJob(false).job!!
+        assertTrue(job.routeAtOpen)
+        assertEquals(5_000L, job.launchLeadMs)
+        val custom = FormState(pkg = "a.b", targets = "x", coupons = "c", routeAtOpen = false, launchLeadSec = "12.5").toJob(false).job!!
+        assertFalse(custom.routeAtOpen)
+        assertEquals(12_500L, custom.launchLeadMs)
+    }
+
+    @Test
+    fun launchLeadMustBeBetweenZeroAndSixHundredSeconds() {
+        val base = FormState(pkg = "a.b", targets = "x", coupons = "c")
+        assertNotNull(base.copy(launchLeadSec = "-1").toJob(false).error)
+        assertNotNull(base.copy(launchLeadSec = "601").toJob(false).error)
+        assertNotNull(base.copy(launchLeadSec = "abc").toJob(false).error)
+        assertNull(base.copy(launchLeadSec = "0").toJob(false).error)
+    }
+
+    @Test
     fun ntpTimestampParsing() {
         // 1970-01-01 + 10.5 s
         val secs = 2_208_988_800L + 10

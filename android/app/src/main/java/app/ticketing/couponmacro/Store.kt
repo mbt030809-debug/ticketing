@@ -36,6 +36,8 @@ object Store {
             .putString("slots", f.slots)
             .putString("slotsOff", f.slotsOff)
             .putBoolean("autoRun", f.autoRun)
+            .putBoolean("routeAtOpen", f.routeAtOpen)
+            .putString("launchLeadSec", f.launchLeadSec)
             .putString("warnSec", f.warnSec)
             .putBoolean("showDots", f.showDots)
             .commit()
@@ -136,6 +138,8 @@ object Store {
             slots = slots,
             slotsOff = slotsOff,
             autoRun = p.getBoolean("autoRun", d.autoRun),
+            routeAtOpen = p.getBoolean("routeAtOpen", d.routeAtOpen),
+            launchLeadSec = p.getString("launchLeadSec", d.launchLeadSec).orEmpty().ifBlank { d.launchLeadSec },
             warnSec = p.getString("warnSec", d.warnSec).orEmpty().ifBlank { d.warnSec },
             showDots = p.getBoolean("showDots", d.showDots),
         )

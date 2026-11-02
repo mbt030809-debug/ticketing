@@ -33,6 +33,10 @@ data class Job(
     val showDots: Boolean,
     /** 자동 실행(알람)으로 시작된 작업: 화면 잠금이 풀릴 때까지 기다린 뒤 진행 */
     val awaitUnlock: Boolean = false,
+    /** true(기본): 오픈 launchLeadMs 전에 앱 실행 → 오픈 정각에 경로 이동 → 쿠폰 받기. false: 미리 경로 이동해 두고 대기 */
+    val routeAtOpen: Boolean = true,
+    /** 오픈 몇 ms 전에 앱을 실행할지 (routeAtOpen 일 때) */
+    val launchLeadMs: Long = 5_000,
 ) {
     val hasResultTexts: Boolean
         get() = successTexts.isNotEmpty() || alreadyTexts.isNotEmpty() || soldoutTexts.isNotEmpty()
@@ -206,6 +210,10 @@ data class FormState(
     val warnSec: String = "60",
     /** 클릭 위치 표시(빨간 점) */
     val showDots: Boolean = true,
+    /** 경로 이동을 오픈 정각에 시작할지 (끄면 미리 이동해 두고 대기) */
+    val routeAtOpen: Boolean = true,
+    /** 앱 실행 시점: 오픈 몇 초 전 (0~600) */
+    val launchLeadSec: String = "5",
 ) {
     /**
      * openAt 이 있으면 그 날짜/시각을, 없으면 켜진 회차(slots - slotsOff) 중 다음 오픈 시각을 계산한다.
@@ -223,6 +231,7 @@ data class FormState(
         val interval = intervalMs.trim().toLongOrNull()?.takeIf { it >= 10 } ?: return Parsed(null, "간격(ms) 는 10 이상 숫자")
         val attempts = maxAttempts.trim().toIntOrNull()?.takeIf { it >= 1 } ?: return Parsed(null, "최대 시도는 1 이상 숫자")
         val waitSec = resultWaitSec.trim().toDoubleOrNull()?.takeIf { it >= 0 } ?: return Parsed(null, "결과 대기(초) 는 숫자")
+        val launchLead = launchLeadSec.trim().toDoubleOrNull()?.takeIf { it in 0.0..600.0 } ?: return Parsed(null, "앱 실행 시점(초)은 0~600 숫자")
         val openMs = when {
             openAt.isNotBlank() -> try {
                 Parse.openAt(openAt)
@@ -252,6 +261,8 @@ data class FormState(
                 soldoutTexts = Parse.list(soldout),
                 refreshOnMiss = refreshOnMiss,
                 showDots = showDots,
+                routeAtOpen = routeAtOpen,
+                launchLeadMs = (launchLead * 1000).toLong(),
             ),
             null,
         )

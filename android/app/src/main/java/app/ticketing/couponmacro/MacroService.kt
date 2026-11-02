@@ -606,6 +606,57 @@ class MacroService : AccessibilityService() {
         }
     }
 
+    /** 기록한 이동 경로를 순서대로 따라간다. 실패하면 오류 결과, 성공이면 null. waitLoaded: 단계마다 화면 로딩 완료까지 대기 */
+    private fun replayRoute(job: Job, waitLoaded: Boolean): Outcome? {
+        for ((i, s) in job.steps.withIndex()) {
+            val ok = waitAndClick(job, s.text, 10_000)
+            LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.text}' ${if (ok) "OK" else "못 찾음"}")
+            if (!ok && !s.optional) return Outcome("error", 0, "이동 단계 실패: ${s.text}")
+            if (waitLoaded) {
+                sleep(300)
+                waitForLoaded(job, "이동 ${i + 1}") // 다음 단계/쿠폰 선택은 화면 로딩이 끝난 뒤에
+            } else {
+                sleep(120) // 다음 단계 대상이 나타날 때까지는 waitAndClick 이 기다린다
+            }
+        }
+        return null
+    }
+
+    /**
+     * 예약 실행(기본 흐름): 오픈 launchLeadMs(기본 5초) 전 앱 실행 → 오픈 정각(lead 보정)에 경로 이동 → 쿠폰 받기.
+     * 경로 이동은 정각에 시작하므로 단계마다 오래 기다리지 않고, 마지막에만 짧게 화면 로딩 완료를 확인한 뒤 쿠폰을 누른다.
+     */
+    private fun executeAtOpen(job: Job, offset: Long): Outcome {
+        val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.KOREA)
+        val hasRoute = job.steps.isNotEmpty()
+        val launchAt = job.openAtMillis - job.launchLeadMs
+        val fireAt = job.openAtMillis - job.leadMs
+        LogStore.add(
+            "예약 흐름: 앱 실행 ${fmt.format(Date(launchAt))} → 경로 이동 ${fmt.format(Date(fireAt))}(정각) → 쿠폰 받기" +
+                if (hasRoute) " · 경로 ${job.steps.size}단계" else " · 기록한 경로 없음(현재 화면에서 이어서)",
+        )
+
+        if (job.launchApp) {
+            waitUntil(launchAt, offset)
+            if (!launch(job.pkg, fresh = hasRoute)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
+            LogStore.add(if (hasRoute) "앱 실행(첫 화면에서 시작): ${job.pkg}" else "앱을 앞으로 가져옴(현재 화면 유지): ${job.pkg}")
+            if (!waitForeground(job, 3_000)) {
+                LogStore.add("대상 앱이 자동으로 열리지 않았습니다 (백그라운드 실행 제한일 수 있음) — 직접 열어 주세요")
+                Alerts.warn(this, "앱을 직접 열어 주세요", "${job.name}: 대상 앱이 자동으로 열리지 않았습니다. 앱을 열면 매크로가 이어서 진행합니다")
+            }
+        } else {
+            LogStore.add("앱 실행 생략 — 대상 앱의 시작 화면에 가 있어야 합니다")
+        }
+
+        waitUntil(fireAt, offset)
+        LogStore.add("정각 — 경로 이동 시작")
+        if (hasRoute) replayRoute(job, waitLoaded = false)?.let { return it }
+        // 쿠폰 페이지 로딩이 끝나길 잠깐(최대 4초, 0.5초 안정) 확인하고, 이때 읽은 화면을 결과 판별 기준으로 저장
+        waitForLoaded(job, "이동 완료", maxMs = 4_000, quietMs = 500)
+        lastPageTexts?.let { baseline = it }
+        return clickLoop(job, Mode.LIVE)
+    }
+
     private fun execute(job: Job, mode: Mode): Outcome {
         baseline = null
         baselineOcr = null
@@ -651,8 +702,10 @@ class MacroService : AccessibilityService() {
             LogStore.add("잠금 해제 확인")
         }
 
-        // 예약 실행: 경로가 있으면 앱 첫 화면에서 새로 시작해 경로를 따라가고, 없으면 지금 화면 그대로 이어서 진행.
-        // 테스트(즉시 실행/찾기만): 앱을 다시 시작하지 않고 지금 보던 화면에서 바로 시도한다.
+        // 예약 실행(기본): 오픈 N초 전 앱 실행 → 정각에 경로 이동 → 쿠폰 받기
+        if (mode == Mode.LIVE && job.routeAtOpen) return executeAtOpen(job, offset)
+
+        // (경로 이동을 미리 해 두는 방식 / 테스트) 경로가 있으면 앱 첫 화면에서 새로 시작해 경로를 따라가고, 없으면 지금 화면에서 진행
         val live = mode == Mode.LIVE
         val hasRoute = job.steps.isNotEmpty()
         val fresh = hasRoute // 경로가 있으면 항상 앱 첫 화면에서 시작해 기록한 순서대로 따라간다 (즉시 실행/찾기만 포함)
@@ -672,15 +725,7 @@ class MacroService : AccessibilityService() {
             LogStore.add("테스트: 기록한 경로가 없어 지금 보이는 화면에서 시도합니다")
         }
 
-        if (hasRoute) {
-            for ((i, s) in job.steps.withIndex()) {
-                val ok = waitAndClick(job, s.text, 10_000)
-                LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.text}' ${if (ok) "OK" else "못 찾음"}")
-                if (!ok && !s.optional) return Outcome("error", 0, "이동 단계 실패: ${s.text}")
-                sleep(300)
-                waitForLoaded(job, "이동 ${i + 1}")   // 다음 단계/쿠폰 선택은 화면 로딩이 끝난 뒤에
-            }
-        }
+        if (hasRoute) replayRoute(job, waitLoaded = true)?.let { return it }
 
         if (mode == Mode.LIVE) {
             val fmt = SimpleDateFormat("MM-dd HH:mm:ss", Locale.KOREA)
@@ -873,8 +918,10 @@ class MacroService : AccessibilityService() {
             return true
         }
         if (baseline == null) targetRoot(job)?.let { baseline = snapshotTexts(it) }
-        if (baselineOcr == null && mode != Mode.LIVE && ocrSupported()) {
-            baselineOcr = ocrLines(0)?.map { OcrMatcher.norm(it.text) }?.toSet()
+        if (baselineOcr == null && ocrSupported()) {
+            // 위치를 OCR 로 찾았다면 그때 읽은 화면이 곧 '클릭 전 기준' (예약 실행에선 추가 OCR 로 지연시키지 않음)
+            val src = ocrCache?.second ?: if (mode != Mode.LIVE) ocrLines(0) else null
+            baselineOcr = src?.map { OcrMatcher.norm(it.text) }?.toSet()
         }
         val ok = gesture(pt.first, pt.second, pt.first, pt.second, 40)
         if (ok) {
@@ -1182,7 +1229,7 @@ class MacroService : AccessibilityService() {
                 if (node != null && clickNode(node)) return true
                 if (n++ % 4 == 0) dismissPopups(job, root)
             }
-            sleep(300)
+            sleep(150)
         }
         return false
     }
@@ -1339,24 +1386,31 @@ class MacroService : AccessibilityService() {
         return false
     }
 
-    private class PageSig(val hash: Int, val loading: Boolean, val hasContent: Boolean)
+    private class PageSig(val hash: Int, val loading: Boolean, val hasContent: Boolean, val texts: Set<String>)
+
+    /** 마지막으로 읽은 화면 문구 (로딩 대기 중 얻은 것 — 결과 판별용 기준 화면으로 재사용) */
+    @Volatile private var lastPageTexts: Set<String>? = null
 
     /** 화면 내용 시그니처 + 로딩 표시(ProgressBar) 유무 */
     private fun pageSignature(root: AccessibilityNodeInfo): PageSig {
         var h = 17
         var loading = false
         var seen = 0
+        val texts = HashSet<String>()
         fun walk(n: AccessibilityNodeInfo) {
             if (seen++ >= 800) return
             val cls = n.className?.toString().orEmpty()
             if (cls.contains("ProgressBar") && n.isVisibleToUser) loading = true
             for (t in listOf(n.text?.toString(), n.contentDescription?.toString())) {
-                if (!t.isNullOrBlank() && t.none { it.isDigit() }) h += t.hashCode()
+                if (!t.isNullOrBlank()) {
+                    texts += t.trim()
+                    if (t.none { it.isDigit() }) h += t.hashCode()
+                }
             }
             for (i in 0 until n.childCount) n.getChild(i)?.let { walk(it) }
         }
         walk(root)
-        return PageSig(h, loading, seen >= 5)
+        return PageSig(h, loading, seen >= 5, texts)
     }
 
     /**
@@ -1366,8 +1420,9 @@ class MacroService : AccessibilityService() {
      */
     private fun waitForLoaded(
         job: Job, why: String, maxMs: Long = 6_000, untilMs: Long = Long.MAX_VALUE, offset: Long = 0L,
+        quietMs: Long = 1_000,
     ): Boolean {
-        val tracker = StabilityTracker(1_000)
+        val tracker = StabilityTracker(quietMs)
         val start = SystemClock.elapsedRealtime()
         var announced = false
         while (true) {
@@ -1382,6 +1437,7 @@ class MacroService : AccessibilityService() {
                 tracker.reset()
             } else {
                 val sig = pageSignature(root)
+                lastPageTexts = sig.texts
                 if (tracker.update(sig.hash, sig.loading, sig.hasContent, now)) {
                     if (announced) LogStore.add("화면 로딩 완료($why)")
                     return true
