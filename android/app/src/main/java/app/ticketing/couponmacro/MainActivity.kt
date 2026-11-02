@@ -181,7 +181,7 @@ class MainActivity : Activity() {
             field(b, K_PKG, "대상 앱 패키지").onChanged { refreshAppLine() }
             launchCb = CheckBox(this).apply { text = "시작 시 앱 자동 실행 (끄면 직접 쿠폰 페이지에 가 있어야 함)" }
             b.addView(launchCb)
-            field(b, K_STEPS, "이동 단계 (한 줄에 하나, 해당 문구를 눌러 이동. 앞에 ? 붙이면 없어도 진행)", lines = 3)
+            field(b, K_STEPS, "이동 단계 (한 줄에 하나. 글자를 눌러 이동, 글자 없는 아이콘은 @0.50,0.90 형태의 위치 탭. 앞에 ? 붙이면 없어도 진행)", lines = 3)
                 .onChanged { refreshRoute() }
             field(b, K_TARGETS, "받기 버튼 문구 (쿠폰 카드 안의 버튼)")
             field(b, K_SUCCESS, "성공 문구")
@@ -477,7 +477,7 @@ class MainActivity : Activity() {
         routeLine.text = if (steps.isEmpty()) {
             "경로 없음 — 시작하면 앱만 열립니다. 직접 쿠폰 페이지로 이동해 두거나 아래에서 기록하세요."
         } else {
-            "경로 ${steps.size}단계: " + steps.joinToString(" → ") { (if (it.optional) "(" else "") + it.text + (if (it.optional) ")" else "") }
+            "경로 ${steps.size}단계: " + steps.joinToString(" → ") { (if (it.optional) "(" else "") + (if (it.isTap) "아이콘 탭" else it.text) + (if (it.optional) ")" else "") }
         }
     }
 

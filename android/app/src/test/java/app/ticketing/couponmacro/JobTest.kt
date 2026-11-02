@@ -29,6 +29,54 @@ class JobTest {
     }
 
     @Test
+    fun stepsSupportPositionHintsAndIconTaps() {
+        val steps = Parse.steps("녭다세일@0.2000,0.3500\n@0.5000,0.9000\n?닫기@0.5,0.8\n쿠폰함")
+        assertEquals(
+            listOf(
+                Step("녭다세일", false, 0.2f, 0.35f),   // 글자 + 위치 힌트(같은 글자가 여러 곳이면 가까운 것)
+                Step("", false, 0.5f, 0.9f),           // 글자 없는 아이콘: 위치 탭
+                Step("닫기", true, 0.5f, 0.8f),
+                Step("쿠폰함", false),
+            ),
+            steps,
+        )
+        assertTrue(steps[1].isTap)
+        assertFalse(steps[0].isTap)
+        assertEquals("(아이콘 탭)", steps[1].display())
+        assertEquals("?닫기", steps[2].display())
+    }
+
+    @Test
+    fun malformedPositionSuffixIsTreatedAsPlainText() {
+        // '@' 뒤가 숫자 쌍이 아니면 그냥 글자로 취급
+        assertEquals(listOf(Step("문의@회사", false)), Parse.steps("문의@회사"))
+    }
+
+    @Test
+    fun routeRecordingBuildsLinesForLabelledAndIconClicks() {
+        // 글자 있는 요소: 글자 + 위치 힌트 / 아이콘만: 위치만 / 아무것도 모르면 기록 불가
+        assertEquals("녭다세일@0.2000,0.3500", RouteSteps.line("녭다세일", 0.2f, 0.35f))
+        assertEquals("@0.2000,0.3500", RouteSteps.line(null, 0.2f, 0.35f))
+        assertEquals("혜택", RouteSteps.line("혜택", null, null))
+        assertNull(RouteSteps.line(null, null, null))
+        assertNull(RouteSteps.line("  ", null, 0.5f))
+        // 글자 속 '@' 는 위치 표시와 헷갈리지 않게 공백으로
+        assertEquals("a b@0.1000,0.2000", RouteSteps.line("a@b", 0.1f, 0.2f))
+        // 기록한 줄은 그대로 다시 읽힌다
+        val back = Parse.steps(RouteSteps.line("녭다세일", 0.2f, 0.35f)!! + "\n" + RouteSteps.line(null, 0.5f, 0.9f)!!)
+        assertEquals(listOf(Step("녭다세일", false, 0.2f, 0.35f), Step("", false, 0.5f, 0.9f)), back)
+    }
+
+    @Test
+    fun popupLinesAreRecognizedByTheirTextPart() {
+        val words = listOf("닫기", "나중에")
+        assertTrue(RouteSteps.isPopup("닫기@0.5000,0.8000", words))
+        assertTrue(RouteSteps.isPopup("나중에", words))
+        assertFalse(RouteSteps.isPopup("쿠폰함@0.5000,0.8000", words))
+        assertFalse(RouteSteps.isPopup("@0.5000,0.8000", words))
+    }
+
+    @Test
     fun toJobRequiresPackageAndTarget() {
         assertNotNull(FormState(pkg = "", targets = "x").toJob(false).error)
         assertNotNull(FormState(pkg = "a.b", targets = "").toJob(false).error)

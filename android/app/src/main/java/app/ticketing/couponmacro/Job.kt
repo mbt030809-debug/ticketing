@@ -9,7 +9,37 @@ import java.time.temporal.ChronoUnit
 /** LIVE: 오픈 시각까지 대기 후 클릭 / NOW: 대기 없이 즉시 클릭(리허설) / DRY: 찾기만, 클릭 안 함 */
 enum class Mode { LIVE, NOW, DRY }
 
-data class Step(val text: String, val optional: Boolean)
+/**
+ * 이동 단계 한 칸.
+ *  - 글자 단계:        "혜택"            글자가 보이면 클릭
+ *  - 글자 + 위치 힌트: "혜택@0.20,0.35"   같은 글자가 여러 곳이면 힌트(화면 비율)에 가장 가까운 것을 클릭
+ *  - 위치(아이콘) 단계: "@0.50,0.90"       글자가 없는 아이콘 — 저장한 화면 비율 위치를 탭
+ *  - 앞에 ? 를 붙이면 없어도 진행(optional)
+ */
+data class Step(val text: String, val optional: Boolean, val hintX: Float? = null, val hintY: Float? = null) {
+    /** 글자 없이 위치만으로 탭하는 단계(아이콘) */
+    val isTap: Boolean get() = text.isEmpty() && hintX != null && hintY != null
+
+    /** 화면/리포트 표시용 */
+    fun display(): String = (if (optional) "?" else "") + (if (isTap) "(아이콘 탭)" else text)
+}
+
+/** 경로 기록: 눌린 요소를 이동 단계 한 줄로 만든다 (순수 함수) */
+object RouteSteps {
+    /** label=글자(없으면 null), fx/fy=눌린 위치의 화면 비율(모르면 null). 둘 다 없으면 null(기록 불가) */
+    fun line(label: String?, fx: Float?, fy: Float?): String? {
+        val pos = if (fx != null && fy != null) String.format(java.util.Locale.ROOT, "@%.4f,%.4f", fx, fy) else ""
+        val text = label?.replace('@', ' ')?.trim().orEmpty()
+        return when {
+            text.isNotEmpty() -> text + pos
+            pos.isNotEmpty() -> pos
+            else -> null
+        }
+    }
+
+    /** 매번 뜨지는 않는 팝업 닫기 류인지 (기록 줄 앞부분 글자 기준) */
+    fun isPopup(line: String, popupWords: List<String>): Boolean = popupWords.any { line.substringBefore('@').trim() == it }
+}
 
 data class Job(
     val name: String,
@@ -54,11 +84,24 @@ object Parse {
     fun coupons(s: String): List<String> =
         s.split('\n', ';').map { it.trim() }.filter { it.isNotEmpty() }
 
-    /** 한 줄에 하나. 앞에 ? 를 붙이면 optional(못 찾아도 계속). */
+    private val STEP_POS = Regex("^(.*?)@([0-9]*\\.?[0-9]+)\\s*,\\s*([0-9]*\\.?[0-9]+)$")
+
+    /** 한 줄에 하나(Step 설명 참고). 앞에 ? 를 붙이면 optional(못 찾아도 계속). */
     fun steps(s: String): List<Step> =
-        s.lines().map { it.trim() }.filter { it.isNotEmpty() }
-            .map { if (it.startsWith("?")) Step(it.removePrefix("?").trim(), true) else Step(it, false) }
-            .filter { it.text.isNotEmpty() }
+        s.lines().map { it.trim() }.filter { it.isNotEmpty() }.mapNotNull { raw ->
+            val optional = raw.startsWith("?")
+            val body = raw.removePrefix("?").trim()
+            val m = STEP_POS.matchEntire(body)
+            if (m != null) {
+                val fx = m.groupValues[2].toFloatOrNull()
+                val fy = m.groupValues[3].toFloatOrNull()
+                if (fx != null && fy != null) Step(m.groupValues[1].trim(), optional, fx, fy) else null
+            } else if (body.isNotEmpty()) {
+                Step(body, optional)
+            } else {
+                null
+            }
+        }
 
     /** "yyyy-MM-dd HH:mm[:ss]" (KST) -> epoch ms */
     fun openAt(s: String): Long =

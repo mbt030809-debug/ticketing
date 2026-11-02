@@ -30,6 +30,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import android.view.MotionEvent
 import android.widget.FrameLayout
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -130,6 +131,7 @@ class MacroService : AccessibilityService() {
     private var recordProfile = ""
     private val recorded = ArrayList<String>()
     private var recordOverlay: View? = null
+    private var recordButton: Button? = null
 
     fun isRecording(): Boolean = recordPkg != null
 
@@ -151,7 +153,7 @@ class MacroService : AccessibilityService() {
         hideRecordOverlay()
         val steps = synchronized(recorded) { recorded.toList() }
         // 팝업 닫기 류는 매번 뜨는 게 아니므로 '없어도 진행'(?)으로 저장
-        val lines = steps.map { s -> if (POPUP_WORDS.any { s == it }) "?$s" else s }
+        val lines = steps.map { s -> if (RouteSteps.isPopup(s, POPUP_WORDS)) "?$s" else s }
         if (lines.isNotEmpty()) Store.setPendingSteps(this, recordProfile, lines.joinToString("\n"))
         LogStore.add("경로 기록 끝: ${lines.size}단계")
         notifyResult(
@@ -171,23 +173,47 @@ class MacroService : AccessibilityService() {
     private fun onRecordedClick(event: AccessibilityEvent) {
         val pkg = recordPkg ?: return
         if (event.packageName?.toString() != pkg) return
+        val dm = resources.displayMetrics
+        val src = event.source
+        val r = Rect()
+        src?.getBoundsInScreen(r)
+        val fx = if (src != null && !r.isEmpty) r.exactCenterX() / dm.widthPixels else null
+        val fy = if (src != null && !r.isEmpty) r.exactCenterY() / dm.heightPixels else null
         val label = clickLabel(event)
-        if (label == null) {
-            LogStore.add("기록: 문구 없는 버튼 클릭 — 건너뜀 (직접 이동 단계에 추가하세요)")
+        val line = RouteSteps.line(label, fx, fy)
+        if (line == null) {
+            LogStore.add("기록: 눌린 곳의 글자도 위치도 알 수 없어 건너뜀 — 이동 단계에 직접 추가하세요")
             return
         }
+        if (fx != null && fy != null) showDot(fx * dm.widthPixels, fy * dm.heightPixels, Color.BLUE)
         val n = synchronized(recorded) {
-            if (recorded.lastOrNull() != label) recorded += label
+            if (recorded.lastOrNull() != line) recorded += line
             recorded.size
         }
-        LogStore.add("기록 $n: $label")
+        LogStore.add("기록 $n: ${if (label == null) "(글자 없는 아이콘) 위치 탭 $line" else line}")
+        main.post { recordButton?.text = "■ 기록 끝 (${n}단계)" }
     }
 
     private fun clickLabel(event: AccessibilityEvent): String? {
+        fun clean(raw: String?) = raw?.replace(Regex("\\s+"), " ")?.trim()?.take(40)?.takeIf { it.isNotEmpty() }
         val direct = event.text.firstOrNull()?.toString()?.takeIf { it.isNotBlank() }
             ?: event.contentDescription?.toString()?.takeIf { it.isNotBlank() }
-        val raw = direct ?: event.source?.let { firstLabel(it, 3) }
-        return raw?.replace(Regex("\\s+"), " ")?.trim()?.take(40)?.takeIf { it.isNotEmpty() }
+        clean(direct)?.let { return it }
+        val src = event.source ?: return null
+        clean(firstLabel(src, 3))?.let { return it }
+        // 아이콘만 눌린 경우: 같은 칸(작은 상위 영역) 안의 이름표 글자를 찾는다 (예: 아이콘 아래 이름). 목록 전체처럼 큰 영역은 제외
+        val dm = resources.displayMetrics
+        var a: AccessibilityNodeInfo? = src.parent
+        var depth = 0
+        while (a != null && depth < 3) {
+            val r = Rect()
+            a.getBoundsInScreen(r)
+            if (r.width() > dm.widthPixels * 0.45 || r.height() > dm.heightPixels * 0.25) break
+            clean(firstLabel(a, 2))?.let { return it }
+            a = a.parent
+            depth++
+        }
+        return null
     }
 
     private fun firstLabel(n: AccessibilityNodeInfo, depth: Int): String? {
@@ -206,9 +232,10 @@ class MacroService : AccessibilityService() {
             try {
                 val wm = getSystemService(WINDOW_SERVICE) as WindowManager
                 val b = Button(this).apply {
-                    text = "■ 기록 끝"
+                    text = "■ 기록 끝 (0단계)"
                     setOnClickListener { stopRecording() }
                 }
+                recordButton = b
                 val lp = WindowManager.LayoutParams(
                     WindowManager.LayoutParams.WRAP_CONTENT,
                     WindowManager.LayoutParams.WRAP_CONTENT,
@@ -264,8 +291,8 @@ class MacroService : AccessibilityService() {
                 sleep(2000)
             }
             for ((i, s) in job.steps.withIndex()) {
-                val ok = waitAndClick(job, s.text, 10_000)
-                LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.text}' ${if (ok) "OK" else "못 찾음"}")
+                val ok = runStep(job, s, 10_000)
+                LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.display()}' ${if (ok) "OK" else "못 찾음"}")
                 if (!ok && !s.optional) {
                     LogStore.add("이동 단계 실패 — 직접 쿠폰 페이지로 이동한 뒤 [쿠폰 목록 읽기]를 누르세요")
                     break
@@ -581,17 +608,35 @@ class MacroService : AccessibilityService() {
     /** 기록한 이동 경로를 순서대로 따라간다. 실패하면 오류 결과, 성공이면 null. waitLoaded: 단계마다 화면 로딩 완료까지 대기 */
     private fun replayRoute(job: Job, waitLoaded: Boolean): Outcome? {
         for ((i, s) in job.steps.withIndex()) {
-            val ok = waitAndClick(job, s.text, 10_000)
-            LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.text}' ${if (ok) "OK" else "못 찾음"}")
-            if (!ok && !s.optional) return Outcome("error", 0, "이동 단계 실패: ${s.text}")
+            val ok = runStep(job, s, 10_000)
+            LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.display()}' ${if (ok) "OK" else "못 찾음"}")
+            if (!ok && !s.optional) return Outcome("error", 0, "이동 단계 실패: ${s.display()}")
             if (waitLoaded) {
                 sleep(300)
                 waitForLoaded(job, "이동 ${i + 1}") // 다음 단계/쿠폰 선택은 화면 로딩이 끝난 뒤에
             } else if (i < job.steps.lastIndex) {
-                sleep(120) // 다음 단계 대상이 나타날 때까지는 waitAndClick 이 기다린다
+                // 글자 단계는 다음 대상이 나타날 때까지 waitAndClick 이 기다린다. 위치(아이콘) 탭 단계는 화면이 바뀔 시간을 조금 준다
+                sleep(if (s.isTap || job.steps[i + 1].isTap) 500 else 120)
             }
         }
         return null
+    }
+
+    /**
+     * 이동 단계 하나 실행.
+     * 글자 단계: 글자가 보이면 클릭(위치 힌트가 있으면 같은 글자 중 힌트에 가장 가까운 것), 아이콘 단계: 저장한 화면 비율 위치를 탭.
+     */
+    private fun runStep(job: Job, s: Step, timeoutMs: Long): Boolean {
+        if (s.isTap) {
+            if (!waitForeground(job, timeoutMs)) return false
+            val dm = resources.displayMetrics
+            val x = s.hintX!! * dm.widthPixels
+            val y = s.hintY!! * dm.heightPixels
+            val ok = gesture(x, y, x, y, 40)
+            if (ok) showDot(x, y, Color.RED)
+            return ok
+        }
+        return waitAndClick(job, s.text, timeoutMs, s.hintX, s.hintY)
     }
 
     /**
@@ -1045,14 +1090,29 @@ class MacroService : AccessibilityService() {
         return null
     }
 
-    private fun waitAndClick(job: Job, text: String, timeoutMs: Long): Boolean {
+    /** 같은 글자가 여러 곳이면 힌트(화면 비율)에 가장 가까운 것, 힌트가 없으면 첫 번째 */
+    private fun findNear(root: AccessibilityNodeInfo, text: String, hx: Float?, hy: Float?): AccessibilityNodeInfo? {
+        if (hx == null || hy == null) return find(root, listOf(text))
+        val dm = resources.displayMetrics
+        val px = hx * dm.widthPixels
+        val py = hy * dm.heightPixels
+        return root.findAccessibilityNodeInfosByText(text)
+            .filter { it.isVisibleToUser && it.isEnabled }
+            .minByOrNull { n ->
+                val r = Rect()
+                n.getBoundsInScreen(r)
+                hypot((r.exactCenterX() - px).toDouble(), (r.exactCenterY() - py).toDouble())
+            }
+    }
+
+    private fun waitAndClick(job: Job, text: String, timeoutMs: Long, hx: Float? = null, hy: Float? = null): Boolean {
         val end = SystemClock.elapsedRealtime() + timeoutMs
         var n = 0
         while (SystemClock.elapsedRealtime() < end) {
             checkCancel()
             val root = targetRoot(job)
             if (root != null) {
-                val node = find(root, listOf(text))
+                val node = findNear(root, text, hx, hy)
                 if (node != null && clickNode(node)) return true
                 if (n++ % 4 == 0) dismissPopups(job, root)
             }
