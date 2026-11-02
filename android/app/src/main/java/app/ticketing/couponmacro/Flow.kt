@@ -28,7 +28,8 @@ object Flow {
     fun plan(job: Job, mode: Mode, appInFront: Boolean): FlowPlan {
         val live = mode == Mode.LIVE
         val hasRoute = job.steps.isNotEmpty()
-        val atOpen = live && job.routeAtOpen
+        // 정각 흐름(앱 실행 → N초 대기 → 경로 이동 → 쿠폰 선택). 테스트(즉시 실행/찾기만)도 경로가 있으면 같은 흐름으로 연습한다.
+        val atOpen = job.routeAtOpen && (live || hasRoute)
         return FlowPlan(
             atOpen = atOpen,
             launch = if (live) job.launchApp else (hasRoute || !appInFront),
@@ -40,6 +41,12 @@ object Flow {
             pullRefreshOnMiss = live && job.refreshOnMiss,
         )
     }
+
+    /**
+     * 테스트(즉시 실행/찾기만)용: 지금 시각을 '오픈'으로 보고 오픈 launchLeadMs 뒤로 잡는다 —
+     * 지금 앱 실행 → launchLeadMs(기본 5초) 뒤 경로 이동 → 쿠폰 선택. 예약 실행과 같은 시간표를 그대로 쓴다.
+     */
+    fun rehearsal(job: Job, nowMs: Long): Job = job.copy(openAtMillis = nowMs + job.launchLeadMs, awaitUnlock = false)
 
     /** 정각 이동 흐름의 시각표: 앱 실행 시각 / 경로 이동(클릭) 시작 시각 */
     fun timeline(job: Job): Timeline = Timeline(job.openAtMillis - job.launchLeadMs, job.openAtMillis - job.leadMs)

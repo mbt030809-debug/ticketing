@@ -45,15 +45,47 @@ class FlowTest {
                 assertTrue("$mode/$front", p.launch)
                 assertTrue(p.freshStart)
                 assertTrue(p.replayRoute)
-                assertFalse(p.waitForOpen)
-                assertFalse(p.atOpen)
+                assertFalse(p.waitForOpen)   // 오픈 시각을 기다리지는 않는다
             }
         }
     }
 
     @Test
+    fun testsRehearseTheReservedFlowLaunchWaitRouteThenSelect() {
+        // 회귀: 즉시 실행이 '앱 실행 → 5초 대기 → 경로 이동' 을 안 하고 앱을 열자마자 경로를 따라가던 문제
+        for (mode in listOf(Mode.NOW, Mode.DRY)) {
+            val p = Flow.plan(job(route), mode, appInFront = true)
+            assertTrue("$mode: 예약과 같은 정각 흐름", p.atOpen)
+            assertFalse("$mode: 단계마다 로딩을 기다리지 않는다(예약과 동일)", p.waitLoadedBetweenSteps)
+        }
+        // 지금을 '오픈 5초 전'으로 본다: 지금 앱 실행 → 5초(-lead) 뒤 경로 이동
+        val now = 1_000_000L
+        val r = Flow.rehearsal(job(route), now)
+        assertEquals(now + 5_000, r.openAtMillis)
+        val tl = Flow.timeline(r)
+        assertEquals(now, tl.launchAtMs)               // 앱 실행은 지금
+        assertEquals(now + 5_000 - 100, tl.fireAtMs)   // 경로 이동은 앱 실행 5초(-lead) 뒤
+        assertFalse(r.awaitUnlock)
+        // 사용자가 정한 '앱 실행 시점(초)'을 그대로 따른다
+        val custom = FormState(
+            pkg = "a.b", targets = "x", coupons = "c", steps = route, launchLeadSec = "8", openAt = "2026-11-05 10:00:00",
+        ).toJob(true).job!!
+        assertEquals(now + 8_000, Flow.rehearsal(custom, now).openAtMillis)
+    }
+
+    @Test
+    fun testsWithLegacyPreNavigateKeepTheOldFlow() {
+        // '경로 이동을 오픈 정각에 시작' 을 끈 사용자의 테스트는 예전처럼 앱 시작 후 바로 경로 이동
+        val p = Flow.plan(job(route, routeAtOpen = false), Mode.NOW, appInFront = true)
+        assertFalse(p.atOpen)
+        assertTrue(p.replayRoute)
+        assertTrue(p.waitLoadedBetweenSteps)
+    }
+
+    @Test
     fun testWithoutRouteStaysOnTheCurrentScreen() {
         val inFront = Flow.plan(job(), Mode.NOW, appInFront = true)
+        assertFalse("경로가 없으면 정각 흐름(앱 실행 후 대기)도 없다", inFront.atOpen)
         assertFalse(inFront.launch)
         assertFalse(inFront.replayRoute)
         val notInFront = Flow.plan(job(), Mode.NOW, appInFront = false)

@@ -723,10 +723,11 @@ class MacroService : AccessibilityService() {
     /**
      * 예약 실행(기본 흐름): 오픈 launchLeadMs(기본 5초) 전 앱 실행 → 오픈 정각(lead 보정)에 경로 이동 → 쿠폰 받기.
      * 경로 이동은 정각에 시작하므로 단계마다 오래 기다리지 않고, 마지막에만 짧게 화면 로딩 완료를 확인한 뒤 쿠폰을 누른다.
+     * 테스트(즉시 실행/찾기만)는 job 의 오픈 시각이 '지금 + launchLeadMs' 로 바뀐 채 같은 흐름을 탄다(Flow.rehearsal).
      */
-    private fun executeAtOpen(job: Job, offset: Long): Outcome {
+    private fun executeAtOpen(job: Job, offset: Long, mode: Mode = Mode.LIVE): Outcome {
         val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.KOREA)
-        val plan = Flow.plan(job, Mode.LIVE, appInFront = false)
+        val plan = Flow.plan(job, mode, appInFront = false)
         val hasRoute = plan.replayRoute
         val tl = Flow.timeline(job)
         val launchAt = tl.launchAtMs
@@ -736,7 +737,8 @@ class MacroService : AccessibilityService() {
             LogStore.add("오픈까지 ${waitMin}분 — 그동안 화면이 켜진 채로 유지됩니다 (자동 실행(알람)을 켜면 폰을 잠가 둬도 됩니다)")
         }
         LogStore.add(
-            "예약 흐름: 앱 실행 ${fmt.format(Date(launchAt))} → 경로 이동 ${fmt.format(Date(fireAt))}(정각) → 쿠폰 받기" +
+            (if (mode == Mode.LIVE) "예약 흐름: 앱 실행 ${fmt.format(Date(launchAt))} → 경로 이동 ${fmt.format(Date(fireAt))}(정각) → 쿠폰 받기"
+            else "테스트 흐름: 앱 실행 → ${(fireAt - launchAt) / 1000.0}초 기다린 뒤 경로 이동 → 쿠폰 선택") +
                 if (hasRoute) " · 경로 ${job.steps.size}단계" else " · 기록한 경로 없음(현재 화면에서 이어서)",
         )
 
@@ -759,11 +761,11 @@ class MacroService : AccessibilityService() {
             sig0 = targetRoot(job)?.let { pageSignature(it).hash }
         }
         waitUntil(fireAt, offset)
-        LogStore.add("정각 — 경로 이동 시작")
+        LogStore.add(if (mode == Mode.LIVE) "정각 — 경로 이동 시작" else "앱 실행 후 ${(fireAt - launchAt) / 1000.0}초 경과 — 경로 이동 시작")
         if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps, initialSig = sig0)?.let { return it }
         // 쿠폰 이미지/카드가 화면에 뜨는 즉시 선택한다 (별도 로딩 대기 없음: 클릭 루프가 대상이 보일 때까지 빠르게 확인)
         LogStore.add("경로 이동 끝 — 쿠폰 선택 시작")
-        return clickLoop(job, Mode.LIVE)
+        return clickLoop(job, mode)
     }
 
     private fun execute(job: Job, mode: Mode): Outcome {
@@ -808,11 +810,15 @@ class MacroService : AccessibilityService() {
             LogStore.add("잠금 해제 확인")
         }
 
-        // 예약 실행(기본): 오픈 N초 전 앱 실행 → 정각에 경로 이동 → 쿠폰 받기
-        if (mode == Mode.LIVE && job.routeAtOpen) return executeAtOpen(job, offset)
-
-        // (경로 이동을 미리 해 두는 방식 / 테스트) 단계 구성은 Flow.plan 이 정한다 (단위 테스트로 고정)
+        // 단계 구성은 Flow.plan 이 정한다 (단위 테스트로 고정)
         val plan = Flow.plan(job, mode, appInFront = targetRoot(job) != null)
+
+        // 기본 흐름: 오픈 N초 전 앱 실행 → 정각에 경로 이동 → 쿠폰 받기. 테스트(즉시 실행/찾기만)도 같은 흐름: 앱 실행 → N초 뒤 경로 이동 → 쿠폰 선택
+        if (plan.atOpen) {
+            val flowJob = if (mode == Mode.LIVE) job else Flow.rehearsal(job, System.currentTimeMillis())
+            return executeAtOpen(flowJob, offset, mode)
+        }
+
         if (plan.launch) {
             if (!launch(job.pkg, plan.freshStart)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
             LogStore.add(if (plan.freshStart) "앱 실행(첫 화면에서 시작): ${job.pkg}" else "앱을 앞으로 가져옴(현재 화면 유지): ${job.pkg}")
