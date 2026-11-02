@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">쿠폰 매크로</string>
+    <string name="service_desc">사용자가 시작한 작업 동안에만 대상 앱 화면을 읽고, 지정한 시각에 쿠폰 받기 버튼을 대신 누릅니다. 결과 확인을 위해 토스트 문구를 읽습니다.</string>
+</resources>
