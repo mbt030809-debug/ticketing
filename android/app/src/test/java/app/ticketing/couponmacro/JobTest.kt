@@ -37,7 +37,8 @@ class JobTest {
 
     @Test
     fun toJobOpenAtRequiredOnlyForLive() {
-        val f = FormState(pkg = "a.b", targets = "x", openAt = "")
+        // openAt(날짜 지정)이 비어 있고 회차(slots)도 없으면 LIVE 는 오픈 시각을 알 수 없어 오류
+        val f = FormState(pkg = "a.b", targets = "x", openAt = "", slots = "")
         assertNull(f.toJob(requireOpenAt = false).error)
         assertNotNull(f.toJob(requireOpenAt = true).error)
         assertNotNull(f.copy(openAt = "내일 10시").toJob(true).error)

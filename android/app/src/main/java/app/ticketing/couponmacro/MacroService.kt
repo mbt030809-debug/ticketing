@@ -5,14 +5,17 @@ import android.accessibilityservice.GestureDescription
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Intent
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.widget.Button
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
@@ -33,6 +36,7 @@ class MacroService : AccessibilityService() {
         @Volatile
         var instance: MacroService? = null
         private const val CHANNEL = "result"
+        private val POPUP_WORDS = listOf("닫기", "나중에", "다음에", "건너뛰기", "취소", "오늘 하루 보지 않기", "확인")
     }
 
     @Volatile private var worker: Thread? = null
@@ -51,6 +55,10 @@ class MacroService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         cancel()
+        if (recordPkg != null) {
+            recordPkg = null
+            hideRecordOverlay()
+        }
         instance = null
         return super.onUnbind(intent)
     }
@@ -64,6 +72,11 @@ class MacroService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        // 경로 기록 중에만, 대상 앱에서 눌린 요소의 문구를 기록
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
+            onRecordedClick(event)
+            return
+        }
         // 쿠폰 결과가 토스트로만 뜨는 경우를 위해 토스트 문구만 보관
         if (event.eventType == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED &&
             event.className?.toString()?.contains("Toast") == true
@@ -92,6 +105,118 @@ class MacroService : AccessibilityService() {
     fun cancel() {
         cancelled = true
         worker?.interrupt()
+    }
+
+    // ---- 경로 기록: 사용자가 직접 눌러 이동하는 순서를 '이동 단계'로 저장 ----
+    @Volatile private var recordPkg: String? = null
+    private var recordProfile = ""
+    private val recorded = ArrayList<String>()
+    private var recordOverlay: View? = null
+
+    fun isRecording(): Boolean = recordPkg != null
+
+    /** 대상 앱을 첫 화면으로 열고 기록 시작. 화면 위에 [■ 기록 끝] 버튼이 뜬다. */
+    fun startRecording(pkg: String, profileId: String): Boolean {
+        if (isRunning() || isRecording()) return false
+        synchronized(recorded) { recorded.clear() }
+        recordProfile = profileId
+        if (!launch(pkg)) return false
+        recordPkg = pkg
+        showRecordOverlay()
+        LogStore.add("경로 기록 시작: 쿠폰 페이지까지 평소처럼 눌러 이동한 뒤 [■ 기록 끝]")
+        return true
+    }
+
+    fun stopRecording() {
+        if (recordPkg == null) return
+        recordPkg = null
+        hideRecordOverlay()
+        val steps = synchronized(recorded) { recorded.toList() }
+        // 팝업 닫기 류는 매번 뜨는 게 아니므로 '없어도 진행'(?)으로 저장
+        val lines = steps.map { s -> if (POPUP_WORDS.any { s == it }) "?$s" else s }
+        if (lines.isNotEmpty()) Store.setPendingSteps(this, recordProfile, lines.joinToString("\n"))
+        LogStore.add("경로 기록 끝: ${lines.size}단계")
+        notifyResult(
+            "경로 기록 완료",
+            if (lines.isEmpty()) "기록된 단계가 없습니다 (문구 없는 버튼은 기록되지 않음)" else "${lines.size}단계 저장됨 — 탭해서 앱 열기",
+        )
+        try {
+            startActivity(
+                Intent(this, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
+            )
+        } catch (e: Exception) {
+            LogStore.add("앱 열기 실패(알림을 눌러 여세요): ${e.message}")
+        }
+    }
+
+    private fun onRecordedClick(event: AccessibilityEvent) {
+        val pkg = recordPkg ?: return
+        if (event.packageName?.toString() != pkg) return
+        val label = clickLabel(event)
+        if (label == null) {
+            LogStore.add("기록: 문구 없는 버튼 클릭 — 건너뜀 (직접 이동 단계에 추가하세요)")
+            return
+        }
+        val n = synchronized(recorded) {
+            if (recorded.lastOrNull() != label) recorded += label
+            recorded.size
+        }
+        LogStore.add("기록 $n: $label")
+    }
+
+    private fun clickLabel(event: AccessibilityEvent): String? {
+        val direct = event.text.firstOrNull()?.toString()?.takeIf { it.isNotBlank() }
+            ?: event.contentDescription?.toString()?.takeIf { it.isNotBlank() }
+        val raw = direct ?: event.source?.let { firstLabel(it, 3) }
+        return raw?.replace(Regex("\\s+"), " ")?.trim()?.take(40)?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun firstLabel(n: AccessibilityNodeInfo, depth: Int): String? {
+        n.text?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
+        n.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
+        if (depth <= 0) return null
+        for (i in 0 until n.childCount) {
+            val c = n.getChild(i) ?: continue
+            firstLabel(c, depth - 1)?.let { return it }
+        }
+        return null
+    }
+
+    private fun showRecordOverlay() {
+        main.post {
+            try {
+                val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                val b = Button(this).apply {
+                    text = "■ 기록 끝"
+                    setOnClickListener { stopRecording() }
+                }
+                val lp = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                    PixelFormat.TRANSLUCENT,
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.END
+                    y = (96 * resources.displayMetrics.density).toInt()
+                }
+                wm.addView(b, lp)
+                recordOverlay = b
+            } catch (e: Exception) {
+                LogStore.add("기록 버튼 표시 실패: $e")
+            }
+        }
+    }
+
+    private fun hideRecordOverlay() {
+        main.post {
+            try {
+                recordOverlay?.let { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(it) }
+            } catch (_: Exception) {
+            }
+            recordOverlay = null
+        }
     }
 
     /** delayMs 뒤 현재 전면 화면의 요소(text/desc/id)를 로그로 덤프. 그 사이 대상 앱으로 전환해 둘 것. */
@@ -136,7 +261,7 @@ class MacroService : AccessibilityService() {
                 offset = o
                 LogStore.add("NTP 오프셋 ${o}ms")
             }
-            if (job.openAtMillis - (System.currentTimeMillis() + offset) < -1000) {
+            if (job.openAtMillis - (System.currentTimeMillis() + offset) < -Schedule.GRACE_MS) {
                 return Outcome("error", 0, "오픈 시각이 이미 지났습니다")
             }
         }
@@ -159,7 +284,16 @@ class MacroService : AccessibilityService() {
         if (mode == Mode.LIVE) {
             val fmt = SimpleDateFormat("MM-dd HH:mm:ss", Locale.KOREA)
             LogStore.add("대기: 오픈 ${fmt.format(Date(job.openAtMillis))} (lead ${job.leadMs}ms)")
-            waitUntil(job.openAtMillis - job.leadMs, offset)
+            val fireAt = job.openAtMillis - job.leadMs
+            // 오래 전에 열어 둔 페이지는 낡았을 수 있어 오픈 3초 전에 한 번 새로고침
+            if (job.refreshOnMiss && fireAt - (System.currentTimeMillis() + offset) > 3500) {
+                waitUntil(fireAt - 3000, offset)
+                if (targetRoot(job) != null) {
+                    swipeDown()
+                    LogStore.add("오픈 직전 새로고침")
+                }
+            }
+            waitUntil(fireAt, offset)
         }
         return clickLoop(job, mode)
     }
@@ -288,7 +422,8 @@ class MacroService : AccessibilityService() {
 
     private fun launch(pkg: String): Boolean {
         val i = packageManager.getLaunchIntentForPackage(pkg) ?: return false
-        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+        // 항상 앱 첫 화면에서 시작 (경로 기록 때와 같은 출발점)
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         startActivity(i)
         return true
     }
@@ -403,6 +538,11 @@ class MacroService : AccessibilityService() {
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setContentTitle(title)
                 .setContentText(text)
+                .setContentIntent(
+                    PendingIntent.getActivity(
+                        this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE,
+                    ),
+                )
                 .setAutoCancel(true)
                 .build()
             nm.notify(1, n)

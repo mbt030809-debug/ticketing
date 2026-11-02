@@ -32,7 +32,22 @@ object Store {
             .putString("already", f.already)
             .putString("soldout", f.soldout)
             .putBoolean("refreshOnMiss", f.refreshOnMiss)
+            .putString("slots", f.slots)
+            .putString("slot", f.slot)
             .commit()
+    }
+
+    /** 서비스가 기록한 이동 경로를 앱 화면이 다음에 열릴 때 가져가도록 임시 보관 */
+    fun setPendingSteps(ctx: Context, profileId: String, steps: String) {
+        prefs(ctx, "app").edit().putString("pending_steps_$profileId", steps).commit()
+    }
+
+    fun takePendingSteps(ctx: Context, profileId: String): String? {
+        val p = prefs(ctx, "app")
+        val key = "pending_steps_$profileId"
+        val v = p.getString(key, null) ?: return null
+        p.edit().remove(key).commit()
+        return v
     }
 
     /** 저장된 값이 없으면 null (구버전 단일 폼은 패키지로 판별해 해당 프로필로 이전). */
@@ -66,6 +81,8 @@ object Store {
             already = p.getString("already", d.already).orEmpty(),
             soldout = p.getString("soldout", d.soldout).orEmpty(),
             refreshOnMiss = p.getBoolean("refreshOnMiss", d.refreshOnMiss),
+            slots = p.getString("slots", d.slots).orEmpty().ifBlank { d.slots },
+            slot = p.getString("slot", d.slot).orEmpty().ifBlank { d.slot },
         )
     }
 }

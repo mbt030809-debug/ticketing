@@ -1,8 +1,10 @@
 package app.ticketing.couponmacro
 
+import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 
 /** LIVE: 오픈 시각까지 대기 후 클릭 / NOW: 대기 없이 즉시 클릭(리허설) / DRY: 찾기만, 클릭 안 함 */
 enum class Mode { LIVE, NOW, DRY }
@@ -51,6 +53,78 @@ object Parse {
 
 class Parsed(val job: Job?, val error: String?)
 
+/** 매일 반복되는 회차 시각(KST) 계산. 24:00 은 자정(00:00)으로 취급. */
+object Schedule {
+    const val AUTO = "auto"
+    const val DEFAULT_SLOTS = "12:00, 18:00, 24:00"
+
+    /** 회차 시각 직후 이만큼은 '진행 중'으로 보고 바로 시도한다 (조금 늦게 시작해도 그 회차를 노림) */
+    const val GRACE_MS = 120_000L
+
+    private val SLOT_RE = Regex("^(\\d{1,2}):(\\d{2})(?::(\\d{2}))?$")
+
+    /** "HH:mm[:ss]" -> 하루 중 초(0..86399). 24:00 은 0. 형식 오류는 null. */
+    fun parseSlot(s: String): Int? {
+        val m = SLOT_RE.matchEntire(s.trim()) ?: return null
+        val h = m.groupValues[1].toInt()
+        val min = m.groupValues[2].toInt()
+        val sec = m.groupValues[3].ifEmpty { "0" }.toInt()
+        if (min > 59 || sec > 59 || h > 24 || (h == 24 && (min != 0 || sec != 0))) return null
+        return (h % 24) * 3600 + min * 60 + sec
+    }
+
+    /** 쉼표/줄바꿈 구분 문자열 -> 정렬·중복 제거된 슬롯(초). 잘못된 항목은 무시. */
+    fun parseSlots(s: String): List<Int> = Parse.list(s).mapNotNull { parseSlot(it) }.distinct().sorted()
+
+    /** 자정은 24:00 으로 표기 */
+    fun label(sec: Int): String {
+        if (sec == 0) return "24:00"
+        val h = sec / 3600
+        val m = sec % 3600 / 60
+        val s = sec % 60
+        return if (s == 0) "%02d:%02d".format(h, m) else "%02d:%02d:%02d".format(h, m, s)
+    }
+
+    /**
+     * 다음 오픈 시각(epoch ms). selected 가 "auto" 면 slotSecs 중 가장 가까운 회차,
+     * 아니면 selected 한 회차. GRACE_MS 이내로 지난 회차는 '지금 진행 중'으로 그대로 반환.
+     */
+    fun nextOpen(slotSecs: List<Int>, selected: String, nowMs: Long): Long? {
+        val targets = if (selected == AUTO) slotSecs else listOfNotNull(parseSlot(selected))
+        if (targets.isEmpty()) return null
+        val zone = Parse.ZONE
+        val today = Instant.ofEpochMilli(nowMs).atZone(zone).toLocalDate()
+        val candidates = ArrayList<Long>()
+        for (d in -1L..1L) {
+            val start = today.plusDays(d).atStartOfDay(zone)
+            for (s in targets) candidates += start.plusSeconds(s.toLong()).toInstant().toEpochMilli()
+        }
+        return candidates.filter { it + GRACE_MS >= nowMs }.minOrNull()
+    }
+
+    /** 예: "오늘 18:00 (2시간 14분 뒤)" */
+    fun describe(openMs: Long, nowMs: Long): String {
+        val zone = Parse.ZONE
+        val t = Instant.ofEpochMilli(openMs).atZone(zone)
+        val today = Instant.ofEpochMilli(nowMs).atZone(zone).toLocalDate()
+        val day = when (ChronoUnit.DAYS.between(today, t.toLocalDate())) {
+            0L -> "오늘"
+            1L -> "내일"
+            else -> "${t.monthValue}/${t.dayOfMonth}"
+        }
+        val sec = t.hour * 3600 + t.minute * 60 + t.second
+        val clock = if (sec == 0) "00:00(24시)" else label(sec)
+        val diff = (openMs - nowMs) / 1000
+        val remain = when {
+            diff < 0 -> "진행 중"
+            diff >= 3600 -> "${diff / 3600}시간 ${diff % 3600 / 60}분 뒤"
+            diff >= 60 -> "${diff / 60}분 뒤"
+            else -> "${diff}초 뒤"
+        }
+        return "$day $clock ($remain)"
+    }
+}
+
 /** 화면 입력값(문자열) 그대로의 상태. toJob 으로 검증/변환. */
 data class FormState(
     val name: String = "",
@@ -68,8 +142,16 @@ data class FormState(
     val already: String = "",
     val soldout: String = "",
     val refreshOnMiss: Boolean = true,
+    /** 매일 반복되는 회차 시각(쉼표 구분, 24시간제, 24:00 = 자정) */
+    val slots: String = Schedule.DEFAULT_SLOTS,
+    /** 선택한 회차: "auto"(다음 회차 자동) 또는 슬롯 문자열(예: "18:00") */
+    val slot: String = Schedule.AUTO,
 ) {
-    fun toJob(requireOpenAt: Boolean): Parsed {
+    /**
+     * openAt 이 있으면 그 날짜/시각을, 없으면 slots/slot 에서 다음 오픈 시각을 계산한다.
+     * (UI 는 회차 방식만 사용하고 openAt 은 비워 둔다)
+     */
+    fun toJob(requireOpenAt: Boolean, nowMs: Long = System.currentTimeMillis()): Parsed {
         if (pkg.isBlank()) return Parsed(null, "패키지명이 비어있음 ([앱 선택] 사용)")
         val targetList = Parse.list(targets)
         if (targetList.isEmpty()) return Parsed(null, "받기 버튼 문구가 비어있음")
@@ -77,14 +159,15 @@ data class FormState(
         val interval = intervalMs.trim().toLongOrNull()?.takeIf { it >= 10 } ?: return Parsed(null, "간격(ms) 는 10 이상 숫자")
         val attempts = maxAttempts.trim().toIntOrNull()?.takeIf { it >= 1 } ?: return Parsed(null, "최대 시도는 1 이상 숫자")
         val waitSec = resultWaitSec.trim().toDoubleOrNull()?.takeIf { it >= 0 } ?: return Parsed(null, "결과 대기(초) 는 숫자")
-        val openMs = if (openAt.isBlank() && !requireOpenAt) {
-            0L
-        } else {
-            try {
+        val openMs = when {
+            openAt.isNotBlank() -> try {
                 Parse.openAt(openAt)
             } catch (e: Exception) {
                 return Parsed(null, "오픈 시각 형식 오류 — 예: 2026-11-05 10:00:00")
             }
+            !requireOpenAt -> 0L
+            else -> Schedule.nextOpen(Schedule.parseSlots(slots), slot, nowMs)
+                ?: return Parsed(null, "회차 시각이 없거나 형식 오류 — 예: 12:00, 18:00, 24:00")
         }
         return Parsed(
             Job(

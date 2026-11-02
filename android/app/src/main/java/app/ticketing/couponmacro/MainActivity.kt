@@ -3,8 +3,6 @@ package app.ticketing.couponmacro
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
-import android.app.DatePickerDialog
-import android.app.TimePickerDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
@@ -21,19 +19,16 @@ import android.view.View
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import java.io.File
-import java.time.Instant
-import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
-import java.util.Locale
 
 /**
- * 메인 화면: 이벤트 선택 → 오픈 시각 선택 → 시작. 나머지는 접어 둔 메뉴(테스트/고급/로그/업데이트).
- * 설정은 이벤트(프로필)별로 자동 저장되어 다음 실행 때 그대로 복원된다.
+ * 메인 화면: 이벤트 선택 → 회차(12/18/24시) 선택 → 쿠폰 페이지 가는 길 기록 → 시작.
+ * 나머지는 접어 둔 메뉴(테스트/고급/로그/업데이트). 설정은 이벤트(프로필)별로 자동 저장된다.
  */
 class MainActivity : Activity() {
 
@@ -45,9 +40,15 @@ class MainActivity : Activity() {
     private lateinit var accBox: LinearLayout
     private lateinit var statusLine: TextView
     private lateinit var appLine: TextView
-    private lateinit var timeButton: Button
+    private lateinit var chips: LinearLayout
+    private lateinit var nextLine: TextView
+    private lateinit var routeLine: TextView
     private lateinit var logView: TextView
     private var profile: Profile = Presets.ALL[0]
+
+    /** 매일 반복되는 회차(예: "12:00, 18:00, 24:00")와 선택값("auto" 또는 "18:00") */
+    private var slotsText: String = Schedule.DEFAULT_SLOTS
+    private var slotSel: String = Schedule.AUTO
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -84,13 +85,30 @@ class MainActivity : Activity() {
         root.addView(appLine)
         root.addView(button("대상 앱 변경") { pickApp() })
 
-        // 2) 오픈 시각
-        root.addView(section("2. 오픈 시각"))
-        timeButton = button("") { pickTime() }
-        root.addView(timeButton)
+        // 2) 회차 (매일 반복)
+        root.addView(section("2. 회차 (매일)"))
+        chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        root.addView(HorizontalScrollView(this).apply { addView(chips) })
+        nextLine = TextView(this).apply { setPadding(0, dp(8), 0, 0) }
+        root.addView(nextLine)
+        root.addView(button("회차 시각 수정") { editSlots() })
+        root.addView(note("'자동'은 다음 회차를 알아서 골라요. 시작 버튼은 회차마다 한 번씩 누르면 됩니다."))
 
-        // 3) 시작
-        root.addView(section("3. 시작"))
+        // 3) 쿠폰 페이지 가는 길
+        root.addView(section("3. 쿠폰 페이지 가는 길"))
+        routeLine = TextView(this).apply { setPadding(0, dp(4), 0, dp(4)) }
+        root.addView(routeLine)
+        root.addView(row(button("● 경로 기록") { startRecord() }, button("경로 지우기") { clearRoute() }))
+        root.addView(
+            note(
+                "[경로 기록]을 누르면 대상 앱이 열립니다. 쿠폰 페이지까지 평소처럼 눌러서 이동한 뒤, " +
+                    "화면 위에 뜨는 [■ 기록 끝]을 누르세요. (쿠폰 받기 버튼은 누르지 마세요) " +
+                    "이후 시작하면 같은 순서로 자동 이동합니다.",
+            ),
+        )
+
+        // 4) 시작
+        root.addView(section("4. 시작"))
         root.addView(
             Button(this).apply {
                 text = "▶ 시작"
@@ -102,7 +120,7 @@ class MainActivity : Activity() {
         root.addView(button("■ 중지") { MacroService.instance?.cancel() })
         statusLine = TextView(this).apply { textSize = 14f; setPadding(0, dp(8), 0, 0) }
         root.addView(statusLine)
-        root.addView(note("시작하면 대상 앱이 열립니다. 쿠폰 페이지로 이동해 두면 오픈 시각에 자동으로 누릅니다. (화면은 켜 둔 채로)"))
+        root.addView(note("회차 몇 분 전에 시작하세요. 화면은 켜 둔 채(잠금 해제)로 두면 됩니다."))
 
         // 접이식 메뉴
         collapsible(root, "테스트하기") { b ->
@@ -125,10 +143,10 @@ class MainActivity : Activity() {
         collapsible(root, "고급 설정") { b ->
             b.addView(note("문구는 쉼표(,)로 구분, 부분 일치. 설정은 이벤트별로 자동 저장됩니다."))
             field(b, K_PKG, "대상 앱 패키지").onChanged { refreshAppLine() }
-            launchCb = CheckBox(this).apply { text = "시작 시 앱 자동 실행" }
+            launchCb = CheckBox(this).apply { text = "시작 시 앱 자동 실행 (끄면 직접 쿠폰 페이지에 가 있어야 함)" }
             b.addView(launchCb)
-            field(b, K_OPEN, "오픈 시각 직접 입력 (초 단위) 예: 2026-11-05 10:00:00").onChanged { refreshTime() }
             field(b, K_STEPS, "이동 단계 (한 줄에 하나, 해당 문구를 눌러 이동. 앞에 ? 붙이면 없어도 진행)", lines = 3)
+                .onChanged { refreshRoute() }
             field(b, K_TARGETS, "받기 버튼 문구")
             field(b, K_SUCCESS, "성공 문구")
             field(b, K_ALREADY, "이미 받음 문구")
@@ -138,7 +156,7 @@ class MainActivity : Activity() {
             field(b, K_INTERVAL, "재시도 간격 (ms)")
             field(b, K_ATTEMPTS, "최대 시도 횟수")
             field(b, K_WAIT, "클릭 후 결과 대기 (초)")
-            refreshCb = CheckBox(this).apply { text = "버튼이 안 보이면 아래로 당겨 새로고침" }
+            refreshCb = CheckBox(this).apply { text = "새로고침 사용 (오픈 3초 전 1회 + 버튼이 안 보일 때 아래로 당김)" }
             b.addView(refreshCb)
             b.addView(button("이 이벤트 설정 초기화") { resetProfile() })
         }
@@ -170,6 +188,12 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        // 경로 기록이 끝났으면 기록된 단계를 가져와 저장
+        Store.takePendingSteps(this, profile.id)?.let { steps ->
+            fields.getValue(K_STEPS).setText(steps)
+            saveCurrent()
+            toast("경로 ${Parse.steps(steps).size}단계 저장됨")
+        }
         refreshStatus()
         LogStore.listener = { runOnUiThread { logView.text = LogStore.text(); refreshStatus() } }
         logView.text = LogStore.text()
@@ -197,14 +221,14 @@ class MainActivity : Activity() {
             b.alpha = if (on) 1f else 0.6f
         }
         refreshAppLine()
-        refreshTime()
+        refreshRoute()
     }
 
     private fun resetProfile() {
         AlertDialog.Builder(this)
-            .setMessage("'${profile.label}' 설정을 기본값으로 되돌릴까요? (대상 앱과 오픈 시각은 유지)")
+            .setMessage("'${profile.label}' 설정을 기본값으로 되돌릴까요? (대상 앱은 유지, 이동 경로·회차는 기본값으로)")
             .setPositiveButton("초기화") { _, _ ->
-                showForm(profile.defaults.copy(pkg = f(K_PKG).ifBlank { profile.defaults.pkg }, openAt = f(K_OPEN)))
+                showForm(profile.defaults.copy(pkg = f(K_PKG).ifBlank { profile.defaults.pkg }))
                 saveCurrent()
             }
             .setNegativeButton("취소", null)
@@ -218,6 +242,10 @@ class MainActivity : Activity() {
             toast("접근성 서비스를 먼저 켜세요")
             return
         }
+        if (svc.isRecording()) {
+            toast("경로 기록 중입니다. 화면 위 [■ 기록 끝]을 먼저 누르세요")
+            return
+        }
         if (f(K_PKG).isBlank()) {
             toast("대상 앱을 먼저 선택하세요")
             pickApp()
@@ -229,19 +257,11 @@ class MainActivity : Activity() {
         val job = parsed.job
         if (job == null) {
             toast(parsed.error ?: "입력 오류")
-            if (mode == Mode.LIVE && form.openAt.isBlank()) pickTime()
-            return
-        }
-        if (mode == Mode.LIVE && job.openAtMillis < System.currentTimeMillis()) {
-            toast("오픈 시각이 이미 지났습니다. 다시 선택하세요")
-            pickTime()
             return
         }
         svc.start(job, mode)
-        toast(
-            if (job.launchApp) "시작됨 — 대상 앱이 열리면 쿠폰 페이지로 이동해 두세요"
-            else "시작됨 — 대상 앱의 쿠폰 페이지로 이동해 두세요",
-        )
+        val when_ = if (mode == Mode.LIVE) " · ${Schedule.describe(job.openAtMillis, System.currentTimeMillis())}에 맞춰 대기" else ""
+        toast("시작됨$when_")
     }
 
     private fun refreshStatus() {
@@ -249,7 +269,12 @@ class MainActivity : Activity() {
         val on = svc != null
         accStatus.text = if (on) "접근성: 켜짐" else "접근성: 꺼짐"
         accBox.visibility = if (on) View.GONE else View.VISIBLE
-        statusLine.text = if (svc?.isRunning() == true) "▶ 실행 중 · ${LogStore.last()}" else "대기 중"
+        statusLine.text = when {
+            svc?.isRecording() == true -> "● 경로 기록 중 — 쿠폰 페이지까지 이동 후 [■ 기록 끝]"
+            svc?.isRunning() == true -> "▶ 실행 중 · ${LogStore.last()}"
+            else -> "대기 중"
+        }
+        refreshNext()
     }
 
     private fun openAppInfo() {
@@ -260,6 +285,103 @@ class MainActivity : Activity() {
         val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         cm.setPrimaryClip(ClipData.newPlainText("log", LogStore.text(300)))
         toast("로그 복사됨")
+    }
+
+    // ---- 쿠폰 페이지 가는 길 ----
+    private fun startRecord() {
+        val svc = MacroService.instance
+        if (svc == null) {
+            toast("접근성 서비스를 먼저 켜세요")
+            return
+        }
+        if (f(K_PKG).isBlank()) {
+            toast("대상 앱을 먼저 선택하세요")
+            pickApp()
+            return
+        }
+        if (svc.isRunning()) {
+            toast("실행 중에는 기록할 수 없습니다")
+            return
+        }
+        saveCurrent()
+        if (svc.startRecording(f(K_PKG).trim(), profile.id)) {
+            toast("대상 앱이 열립니다. 쿠폰 페이지까지 이동한 뒤 [■ 기록 끝]을 누르세요")
+        } else {
+            toast("기록을 시작할 수 없습니다 (앱 실행 실패 또는 이미 기록 중)")
+        }
+    }
+
+    private fun clearRoute() {
+        fields.getValue(K_STEPS).setText("")
+        saveCurrent()
+    }
+
+    private fun refreshRoute() {
+        val steps = Parse.steps(f(K_STEPS))
+        routeLine.text = if (steps.isEmpty()) {
+            "경로 없음 — 시작하면 앱만 열립니다. 직접 쿠폰 페이지로 이동해 두거나 아래에서 기록하세요."
+        } else {
+            "경로 ${steps.size}단계: " + steps.joinToString(" → ") { (if (it.optional) "(" else "") + it.text + (if (it.optional) ")" else "") }
+        }
+    }
+
+    // ---- 회차 ----
+    private fun applySlots(slots: String, sel: String) {
+        val parsed = Schedule.parseSlots(slots).ifEmpty { Schedule.parseSlots(Schedule.DEFAULT_SLOTS) }
+        slotsText = parsed.joinToString(", ") { Schedule.label(it) }
+        val selSec = Schedule.parseSlot(sel)
+        slotSel = if (selSec != null && selSec in parsed) Schedule.label(selSec) else Schedule.AUTO
+        refreshSchedule()
+    }
+
+    private fun refreshSchedule() {
+        chips.removeAllViews()
+        fun chip(text: String, key: String) = Button(this).apply {
+            val on = slotSel == key
+            this.text = (if (on) "● " else "") + text
+            setTypeface(null, if (on) Typeface.BOLD else Typeface.NORMAL)
+            alpha = if (on) 1f else 0.6f
+            setOnClickListener {
+                slotSel = key
+                refreshSchedule()
+                saveCurrent()
+            }
+        }
+        chips.addView(chip("자동", Schedule.AUTO))
+        for (s in Schedule.parseSlots(slotsText)) chips.addView(chip(Schedule.label(s), Schedule.label(s)))
+        refreshNext()
+    }
+
+    private fun refreshNext() {
+        val now = System.currentTimeMillis()
+        val open = Schedule.nextOpen(Schedule.parseSlots(slotsText), slotSel, now)
+        nextLine.text = if (open == null) "회차 시각을 확인하세요" else "시작하면 → " + Schedule.describe(open, now) + "에 맞춰 대기"
+    }
+
+    private fun editSlots() {
+        val et = EditText(this).apply {
+            setText(slotsText)
+            isSingleLine = true
+        }
+        AlertDialog.Builder(this)
+            .setTitle("회차 시각 수정")
+            .setMessage("쉼표로 구분, 24시간제. 24:00 = 자정.\n예: 12:00, 18:00, 24:00 (초도 가능: 11:59:59)")
+            .setView(et)
+            .setPositiveButton("저장") { _, _ ->
+                val raw = et.text.toString()
+                if (Schedule.parseSlots(raw).isEmpty()) {
+                    toast("시각 형식 오류 — 예: 12:00, 18:00, 24:00")
+                } else {
+                    applySlots(raw, slotSel)
+                    saveCurrent()
+                }
+            }
+            .setNeutralButton("기본값") { _, _ ->
+                applySlots(Schedule.DEFAULT_SLOTS, slotSel)
+                saveCurrent()
+            }
+            .setNegativeButton("취소", null)
+            .show()
     }
 
     // ---- 대상 앱 ----
@@ -307,44 +429,6 @@ class MainActivity : Activity() {
     private fun refreshAppLine() {
         val pkg = f(K_PKG).trim()
         appLine.text = if (pkg.isEmpty()) "대상 앱: 미지정 — [대상 앱 변경]을 눌러 선택" else "대상 앱: ${labelOf(pkg)}  ($pkg)"
-    }
-
-    // ---- 오픈 시각 ----
-    private fun refreshTime() {
-        val raw = f(K_OPEN)
-        val ms = runCatching { Parse.openAt(raw) }.getOrNull()
-        timeButton.text = when {
-            raw.isBlank() -> "탭해서 오픈 시각 선택"
-            ms == null -> "시각 형식 오류 — 탭해서 다시 선택"
-            else -> {
-                val t = Instant.ofEpochMilli(ms).atZone(Parse.ZONE)
-                val pattern = if (t.second == 0) "M월 d일(E) HH:mm" else "M월 d일(E) HH:mm:ss"
-                t.format(DateTimeFormatter.ofPattern(pattern, Locale.KOREAN)) +
-                    if (ms < System.currentTimeMillis()) "   (지난 시각 — 다시 선택)" else ""
-            }
-        }
-    }
-
-    private fun pickTime() {
-        val cur = runCatching { LocalDateTime.ofInstant(Instant.ofEpochMilli(Parse.openAt(f(K_OPEN))), Parse.ZONE) }
-            .getOrNull()
-            ?.takeIf { it.isAfter(LocalDateTime.now(Parse.ZONE)) }
-            ?: LocalDateTime.now(Parse.ZONE).plusDays(1).withHour(10).withMinute(0).withSecond(0).withNano(0)
-        DatePickerDialog(
-            this,
-            { _, y, m, d ->
-                TimePickerDialog(
-                    this,
-                    { _, h, min ->
-                        val t = LocalDateTime.of(y, m + 1, d, h, min, 0)
-                        fields.getValue(K_OPEN).setText(t.format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")))
-                        saveCurrent()
-                    },
-                    cur.hour, cur.minute, true,
-                ).show()
-            },
-            cur.year, cur.monthValue - 1, cur.dayOfMonth,
-        ).show()
     }
 
     // ---- 업데이트 ----
@@ -410,17 +494,17 @@ class MainActivity : Activity() {
 
     private fun readForm() = FormState(
         name = profile.label, pkg = f(K_PKG).trim(), launchApp = launchCb.isChecked,
-        openAt = f(K_OPEN).trim(), leadMs = f(K_LEAD), intervalMs = f(K_INTERVAL),
+        openAt = "", leadMs = f(K_LEAD), intervalMs = f(K_INTERVAL),
         maxAttempts = f(K_ATTEMPTS), resultWaitSec = f(K_WAIT),
         steps = f(K_STEPS), popups = f(K_POPUPS), targets = f(K_TARGETS),
         success = f(K_SUCCESS), already = f(K_ALREADY), soldout = f(K_SOLDOUT),
         refreshOnMiss = refreshCb.isChecked,
+        slots = slotsText, slot = slotSel,
     )
 
     private fun showForm(s: FormState) {
         fields.getValue(K_PKG).setText(s.pkg)
         launchCb.isChecked = s.launchApp
-        fields.getValue(K_OPEN).setText(s.openAt)
         fields.getValue(K_LEAD).setText(s.leadMs)
         fields.getValue(K_INTERVAL).setText(s.intervalMs)
         fields.getValue(K_ATTEMPTS).setText(s.maxAttempts)
@@ -432,6 +516,7 @@ class MainActivity : Activity() {
         fields.getValue(K_ALREADY).setText(s.already)
         fields.getValue(K_SOLDOUT).setText(s.soldout)
         refreshCb.isChecked = s.refreshOnMiss
+        applySlots(s.slots, s.slot)
     }
 
     // ---- UI 헬퍼 ----
@@ -508,7 +593,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val K_PKG = "pkg"
-        private const val K_OPEN = "openAt"
         private const val K_LEAD = "leadMs"
         private const val K_INTERVAL = "intervalMs"
         private const val K_ATTEMPTS = "maxAttempts"
