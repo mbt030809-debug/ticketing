@@ -636,6 +636,7 @@ class MacroService : AccessibilityService() {
 
     private fun execute(job: Job, mode: Mode): Outcome {
         baselineProbe = null
+        fractionLogged.clear()
         var offset = 0L
         if (mode == Mode.LIVE) {
             val o = Ntp.offsetMs()
@@ -810,16 +811,38 @@ class MacroService : AccessibilityService() {
     private class PosState {
         var clicks = 0
         var lastAt = 0L
+        var anchorMisses = 0 // 기준 글자가 안 보인 횟수
     }
 
     private fun shown(entry: String): String =
         PosTarget.parse(entry)?.let { "위치(${it.anchor.ifEmpty { "화면 비율" }})" } ?: entry
 
-    /** 위치로 지정한 쿠폰: 기준 문구(접근성)가 보이면 그 기준 + 상대 위치를 즉시 탭 */
+    /**
+     * 위치로 지정한 쿠폰: 기준 글자가 보이면 그 글자 + 상대 위치를, 기준 글자가 없거나 안 보이면
+     * 저장해 둔 화면 비율 위치를 탭한다 (이미지 화면은 접근성에 글자가 없어도 위치만으로 동작해야 한다).
+     */
     private fun handlePos(
         job: Job, mode: Mode, rules: CouponRules, root: AccessibilityNodeInfo, attempt: Int,
         entry: String, pos: PosTarget, st: PosState, done: MutableMap<String, String>,
-    ): Boolean = handleTap(job, mode, rules, attempt, entry, st, done) { resolvePos(root, pos) }
+    ): Boolean = handleTap(job, mode, rules, attempt, entry, st, done) {
+        val byAnchor = if (pos.anchor.isEmpty()) null else posByAnchor(root, pos)
+        when (Flow.posSource(pos.anchor.isEmpty(), byAnchor != null, st.anchorMisses, mode == Mode.LIVE)) {
+            PosSource.ANCHOR -> byAnchor
+            PosSource.FRACTION -> {
+                if (pos.anchor.isNotEmpty() && fractionLogged.add(entry)) {
+                    LogStore.add("[${shown(entry)}] 기준 글자 '${pos.anchor}'가 화면에 안 보여, 저장된 화면 비율 위치(${(pos.fx * 100).toInt()}%, ${(pos.fy * 100).toInt()}%)로 탭합니다")
+                }
+                posByFraction(pos)
+            }
+            PosSource.WAIT -> {
+                st.anchorMisses++
+                null
+            }
+        }
+    }
+
+    /** 위치 대상에서 기준 글자를 못 찾았다고 한 번만 알리기 위한 기록 */
+    private val fractionLogged = HashSet<String>()
 
     /**
      * 좌표 하나를 반복 탭하는 처리. 화면에서 대상 좌표를 얻었으면 true.
@@ -864,19 +887,24 @@ class MacroService : AccessibilityService() {
         return true
     }
 
-    /** 기준 문구 + 상대 위치(dp) -> 화면 좌표. 기준 문구가 지정됐는데 안 보이면 null(아직 못 찾음) */
-    private fun resolvePos(root: AccessibilityNodeInfo, p: PosTarget): Pair<Float, Float>? {
+    /** 기준 글자(접근성) + 상대 위치(dp) -> 화면 좌표. 기준 글자가 안 보이면 null */
+    private fun posByAnchor(root: AccessibilityNodeInfo, p: PosTarget): Pair<Float, Float>? {
         val dm = resources.displayMetrics
-        val pt: Pair<Float, Float> = if (p.anchor.isEmpty()) {
-            (p.fx * dm.widthPixels) to (p.fy * dm.heightPixels)
-        } else {
-            val a = root.findAccessibilityNodeInfosByText(p.anchor).firstOrNull { it.isVisibleToUser } ?: return null
-            val r = Rect()
-            a.getBoundsInScreen(r)
-            (r.left + p.dxDp * dm.density) to (r.top + p.dyDp * dm.density)
-        }
-        if (pt.first < 0 || pt.second < 0 || pt.first > dm.widthPixels || pt.second > dm.heightPixels) return null
-        return pt
+        val a = root.findAccessibilityNodeInfosByText(p.anchor).firstOrNull { it.isVisibleToUser } ?: return null
+        val r = Rect()
+        a.getBoundsInScreen(r)
+        return inScreen((r.left + p.dxDp * dm.density) to (r.top + p.dyDp * dm.density))
+    }
+
+    /** 저장된 화면 비율 위치 -> 화면 좌표 */
+    private fun posByFraction(p: PosTarget): Pair<Float, Float>? {
+        val dm = resources.displayMetrics
+        return inScreen((p.fx * dm.widthPixels) to (p.fy * dm.heightPixels))
+    }
+
+    private fun inScreen(pt: Pair<Float, Float>): Pair<Float, Float>? {
+        val dm = resources.displayMetrics
+        return if (pt.first < 0 || pt.second < 0 || pt.first > dm.widthPixels || pt.second > dm.heightPixels) null else pt
     }
 
     private fun posResult(job: Job, rules: CouponRules, clickedAt: Long): String? {
@@ -927,8 +955,9 @@ class MacroService : AccessibilityService() {
                     if (pos.anchor.isNotEmpty()) {
                         val n = root.findAccessibilityNodeInfosByText(pos.anchor).count { it.isVisibleToUser }
                         LogStore.add(
-                            "[${shown(entry)}] 기준 문구 '${pos.anchor}' " +
-                                if (n > 0) "${n}개 보임 (위치가 화면 밖이면 탭 못 함)" else "화면에 안 보임 — 쿠폰 페이지가 맞는지/스크롤 위치 확인",
+                            "[${shown(entry)}] 기준 글자 '${pos.anchor}' " +
+                                if (n > 0) "${n}개 보임 (계산한 위치가 화면 밖이면 탭 못 함)"
+                                else "접근성에 안 보임 — 화면 비율 위치(${(pos.fx * 100).toInt()}%, ${(pos.fy * 100).toInt()}%)로 탭합니다",
                         )
                     }
                 } else {

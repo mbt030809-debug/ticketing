@@ -107,3 +107,31 @@ class FlowTest {
         assertEquals(hour, Flow.wakeLockMs(j, Mode.NOW, open - 3 * hour))
     }
 }
+
+/** 위치 지정 항목이 '기준 글자를 못 찾아서 멈추던' 문제의 회귀 방지 */
+class PosSourceTest {
+    @Test
+    fun anchorVisibleUsesAnchorOtherwiseFallsBackToStoredScreenFractions() {
+        // 기준 글자가 보이면 그 기준으로
+        assertEquals(PosSource.ANCHOR, Flow.posSource(anchorEmpty = false, anchorVisible = true, anchorMisses = 0, live = true))
+        // 기준 글자가 아예 없는 항목은 처음부터 화면 비율
+        assertEquals(PosSource.FRACTION, Flow.posSource(anchorEmpty = true, anchorVisible = false, anchorMisses = 0, live = true))
+    }
+
+    @Test
+    fun missingAnchorNeverBlocksForever() {
+        // 테스트(즉시 실행/찾기만)는 기다리지 않고 바로 화면 비율 위치
+        assertEquals(PosSource.FRACTION, Flow.posSource(false, false, 0, live = false))
+        // 예약 실행은 짧게(3회) 확인해 본 뒤 화면 비율 위치로 — 기준 글자가 접근성에 없는 이미지 화면에서도 반드시 탭한다
+        for (m in 0 until Flow.POS_FALLBACK_AFTER) {
+            assertEquals("miss=$m", PosSource.WAIT, Flow.posSource(false, false, m, live = true))
+        }
+        assertEquals(PosSource.FRACTION, Flow.posSource(false, false, Flow.POS_FALLBACK_AFTER, live = true))
+    }
+
+    @Test
+    fun anchorWinsEvenAfterMisses() {
+        // 중간에 기준 글자가 나타나면 다시 기준 방식으로
+        assertEquals(PosSource.ANCHOR, Flow.posSource(false, true, 5, live = true))
+    }
+}

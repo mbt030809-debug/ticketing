@@ -50,4 +50,23 @@ object Flow {
         if (mode != Mode.LIVE) return hour
         return maxOf(hour, job.openAtMillis - nowMs + 15 * 60 * 1000L).coerceAtMost(24 * hour)
     }
+
+    /** 기준 글자를 못 찾는 상태가 이만큼(회) 이어지면 저장된 화면 비율 위치로 탭한다 (예약 실행) */
+    const val POS_FALLBACK_AFTER = 3
+
+    /**
+     * 위치로 지정한 쿠폰을 무엇을 기준으로 탭할지.
+     * ANCHOR: 기준 글자가 보이면 그 글자 + 상대 위치 (페이지가 밀려도 같은 카드)
+     * FRACTION: 저장해 둔 화면 비율 위치 (기준 글자가 없거나 안 보일 때 — 이미지 화면은 글자 정보가 없을 수 있다)
+     * WAIT: 예약 실행에서 기준 글자가 잠깐 안 보임 — 몇 번 더 확인해 보고 그래도 안 보이면 FRACTION
+     */
+    fun posSource(anchorEmpty: Boolean, anchorVisible: Boolean, anchorMisses: Int, live: Boolean): PosSource = when {
+        anchorEmpty -> PosSource.FRACTION
+        anchorVisible -> PosSource.ANCHOR
+        !live -> PosSource.FRACTION
+        anchorMisses >= POS_FALLBACK_AFTER -> PosSource.FRACTION
+        else -> PosSource.WAIT
+    }
 }
+
+enum class PosSource { ANCHOR, FRACTION, WAIT }
