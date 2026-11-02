@@ -98,9 +98,9 @@ class StepSettleTest {
     @Test
     fun minimumWaitFollowsTheRecordedGapWithinBounds() {
         assertEquals(600L, Settle.minWaitMs(null, isLast = false))
-        assertEquals(500L, Settle.minWaitMs(100, isLast = false))
+        assertEquals(300L, Settle.minWaitMs(100, isLast = false))
         assertEquals(1_800L, Settle.minWaitMs(1_800, isLast = false))
-        assertEquals(4_000L, Settle.minWaitMs(60_000, isLast = false))
+        assertEquals(2_500L, Settle.minWaitMs(60_000, isLast = false))
         assertEquals(Settle.LAST_STEP_MIN_MS, Settle.minWaitMs(1_800, isLast = true))
     }
 }

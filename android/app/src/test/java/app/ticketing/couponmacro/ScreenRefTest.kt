@@ -92,11 +92,21 @@ class ScreenRefTest {
 class ScreenWaitTest {
     private val ref = fakePage(0)
 
+    /** 기준과 약 86% 만 같은 화면: 거의 똑같다(90%)고는 못 하지만 같은 화면(80%)으로는 볼 수 있다 */
+    private val near = IntArray(ref.size) { if (it % 7 == 0) (ref[it] + 100) % 256 else ref[it] }
+
     @Test
-    fun needsTwoConsecutiveMatches() {
+    fun exactlyTheSameScreenIsAcceptedAtOnce() {
+        // 속도: 스크롤이 끝나 기록 때와 똑같아진 화면은 한 번만 봐도 바로 누른다
         val w = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
-        assertEquals(ScreenVerdict.WAIT, w.update(fakePage(0), 100))
-        assertEquals(ScreenVerdict.MATCH, w.update(fakePage(0), 500))
+        assertEquals(ScreenVerdict.MATCH, w.update(fakePage(0, noise = 8), 100))
+    }
+
+    @Test
+    fun similarButNotExactNeedsTwoConsecutiveMatches() {
+        val w = ScreenWait(ref, null, null, startMs = 0)
+        assertEquals(ScreenVerdict.WAIT, w.update(near, 100))
+        assertEquals(ScreenVerdict.MATCH, w.update(near, 500))
     }
 
     @Test
@@ -116,39 +126,39 @@ class ScreenWaitTest {
         val w = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
         assertEquals(ScreenVerdict.WAIT, w.update(fakePage(6), 100))  // 로딩 직후: 아직 스크롤 전
         assertEquals(ScreenVerdict.WAIT, w.update(fakePage(3), 500))  // 스크롤 중
-        assertEquals(ScreenVerdict.WAIT, w.update(fakePage(0), 900))  // 도착(1회)
-        assertEquals(ScreenVerdict.MATCH, w.update(fakePage(0), 1_300)) // 도착(2회) -> 누른다
+        assertEquals(ScreenVerdict.MATCH, w.update(fakePage(0), 900)) // 도착 -> 바로 누른다
     }
 
     @Test
-    fun aPassingMatchDoesNotCount() {
-        // 스크롤이 지나가며 잠깐 같아 보인 것만으로는 누르지 않는다
+    fun aPassingSimilarScreenDoesNotCount() {
+        // 비슷해 보이는 화면이 잠깐 지나간 것만으로는 누르지 않는다(연속 2회 필요)
         val w = ScreenWait(ref, null, null, startMs = 0)
-        assertEquals(ScreenVerdict.WAIT, w.update(fakePage(0), 100))
+        assertEquals(ScreenVerdict.WAIT, w.update(near, 100))
         assertEquals(ScreenVerdict.WAIT, w.update(fakePage(2), 500))
-        assertEquals(ScreenVerdict.WAIT, w.update(fakePage(0), 900))
-        assertEquals(ScreenVerdict.MATCH, w.update(fakePage(0), 1_300))
+        assertEquals(ScreenVerdict.WAIT, w.update(near, 900))
+        assertEquals(ScreenVerdict.MATCH, w.update(near, 1_300))
     }
 
     @Test
     fun captureFailureBreaksTheStreak() {
         val w = ScreenWait(ref, null, null, startMs = 0)
-        assertEquals(ScreenVerdict.WAIT, w.update(fakePage(0), 100))
+        assertEquals(ScreenVerdict.WAIT, w.update(near, 100))
         assertEquals(ScreenVerdict.WAIT, w.update(null, 500))
-        assertEquals(ScreenVerdict.WAIT, w.update(fakePage(0), 900))
-        assertEquals(ScreenVerdict.MATCH, w.update(fakePage(0), 1_300))
+        assertEquals(ScreenVerdict.WAIT, w.update(near, 900))
+        assertEquals(ScreenVerdict.MATCH, w.update(near, 1_300))
     }
 
     @Test
     fun looserMatchOnlyAfterWaitingLong() {
-        // 배너 등이 계속 바뀌어 77% 만 같은 화면: 처음엔 안 맞고, 오래 기다리면 인정
+        // 배너 등이 계속 바뀌어 77% 만 같은 화면: 처음엔 안 맞고, 조금 기다리면 인정
         val cur = IntArray(ref.size) { if (it % 9 < 2) (ref[it] + 100) % 256 else ref[it] }
         val w = ScreenWait(ref, null, null, startMs = 0)
+        val relax = ScreenRef.RELAX_AFTER_MS
         assertEquals(ScreenVerdict.WAIT, w.update(cur, 100))
-        assertEquals(ScreenVerdict.WAIT, w.update(cur, 800))
-        assertEquals(ScreenVerdict.WAIT, w.update(cur, 4_000))
-        assertEquals(ScreenVerdict.WAIT, w.update(cur, 5_100))
-        assertEquals(ScreenVerdict.MATCH, w.update(cur, 5_500))
+        assertEquals(ScreenVerdict.WAIT, w.update(cur, relax - 500))
+        assertEquals(ScreenVerdict.WAIT, w.update(cur, relax + 100))
+        assertEquals(ScreenVerdict.MATCH, w.update(cur, relax + 500))
+        assertTrue("완화 구간이 최대 대기 안에 있어야 함", relax + 500 < ScreenRef.MAX_WAIT_MS)
     }
 
     @Test
@@ -159,8 +169,8 @@ class ScreenWaitTest {
         val w = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
         assertEquals(ScreenVerdict.WAIT, w.update(cur, 100))
         assertEquals(ScreenVerdict.WAIT, w.update(cur, 500))
-        assertEquals(ScreenVerdict.WAIT, w.update(cur, 6_000))
-        assertEquals(ScreenVerdict.WAIT, w.update(cur, 6_400))
+        assertEquals(ScreenVerdict.WAIT, w.update(cur, ScreenRef.RELAX_AFTER_MS + 100))
+        assertEquals(ScreenVerdict.WAIT, w.update(cur, ScreenRef.RELAX_AFTER_MS + 500))
     }
 }
 

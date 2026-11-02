@@ -700,7 +700,13 @@ class MacroService : AccessibilityService() {
     }
 
     // ---- 작업 실행 ----
+    /** 지금 실행 중인 예약 작업의 오픈 시각(epoch ms). 없으면 0 — 자동 실행 알람이 같은 회차를 중복 시작하지 않도록 */
+    @Volatile private var runningOpenAtMs = 0L
+
+    fun runningOpenAt(): Long = if (isRunning()) runningOpenAtMs else 0L
+
     private fun runJob(job: Job, mode: Mode) {
+        runningOpenAtMs = if (mode == Mode.LIVE) job.openAtMillis else 0L
         dots = job.showDots
         acquireWakeLock(Flow.wakeLockMs(job, mode, System.currentTimeMillis()))
         setKeepScreenOn(true)
@@ -715,6 +721,7 @@ class MacroService : AccessibilityService() {
             LogStore.add("오류: $e")
             notifyResult(job.name, "오류: ${e.message}")
         } finally {
+            runningOpenAtMs = 0L
             setKeepScreenOn(false)
             releaseWakeLock()
         }
@@ -731,7 +738,7 @@ class MacroService : AccessibilityService() {
      * firstScreenChecked: 첫 단계의 기준 화면은 이미 기다렸음(예약 흐름에서 앱이 뜨는 동안 미리 확인)
      */
     private fun replayRoute(job: Job, waitLoaded: Boolean, initial: PageSig? = null, firstScreenChecked: Boolean = false): Outcome? {
-        var cur: PageSig? = initial ?: targetRoot(job)?.let { pageSignature(it) }
+        var cur: PageSig? = initial // 없으면 첫 시간 기준 대기 때 처음 읽은 화면을 기준으로 삼는다(첫 탭 전에 화면 전체를 읽느라 늦추지 않음)
         val n = job.steps.size
         val hasRefs = job.steps.any { it.ref != null || it.endRef != null }
         var useRefs = hasRefs && Build.VERSION.SDK_INT >= 30
@@ -946,7 +953,7 @@ class MacroService : AccessibilityService() {
             if (s0 != null && Build.VERSION.SDK_INT >= 30 && RouteScreens.waitsBefore(job.steps, 0)) {
                 firstChecked = ScreenRef.gridOf(s0.ref)?.let { awaitScreen(it, s0.hintX, s0.hintY, "앱 첫 화면") } == true
             }
-            start = waitScreenReady(job, fireAt, offset)
+            if (firstChecked) waitUntil(fireAt, offset) else start = waitScreenReady(job, fireAt, offset) // 화면을 이미 확인했으면 정각만 기다림
         } else {
             waitUntil(fireAt, offset)
         }

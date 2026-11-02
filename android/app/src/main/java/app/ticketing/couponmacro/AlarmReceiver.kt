@@ -33,6 +33,13 @@ class AlarmReceiver : BroadcastReceiver() {
         val form = Store.load(ctx, pid) ?: profile.defaults
         if (!form.autoRun) return // 그 사이 사용자가 자동 실행을 껐음
 
+        // [예약 시작]으로 이미 같은 회차를 실행 중이면 그대로 진행 (건너뛰었다는 알림을 내지 않는다)
+        val running = MacroService.instance
+        if (running != null && running.isRunning() && running.runningOpenAt() == occ) {
+            LogStore.add("[자동] ${profile.label} ${Schedule.describe(occ, now)} — 이미 예약 실행 중이라 그대로 진행")
+            return
+        }
+
         val title = "⏰ ${profile.label}"
         Alerts.warn(
             ctx,

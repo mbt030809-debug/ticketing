@@ -21,16 +21,20 @@ object ScreenRef {
     /** 같은 화면으로 보는 칸 비율: 평소 / 오래 기다려도 안 맞을 때(배너가 계속 바뀌는 화면 등) */
     const val STRICT = 0.80f
     const val RELAXED = 0.70f
-    const val RELAX_AFTER_MS = 5_000L
+    const val RELAX_AFTER_MS = 3_000L
+
+    /** 거의 똑같은 화면(전체 90%+, 누를 자리 주변 85%+)은 한 번만 봐도 인정 — 연속 2회 확인을 기다리지 않아 단계마다 약 0.4초 빠르다 */
+    const val EXACT = 0.90f
+    const val EXACT_REGION = 0.85f
 
     /** 누른 곳 주변(가로 ±2칸, 세로 ±1칸)의 같은 칸 비율 */
     const val REGION = 0.75f
 
     /** 이 시간을 넘기면 원하는 화면이 안 떠도 그대로 진행 */
-    const val MAX_WAIT_MS = 9_000L
+    const val MAX_WAIT_MS = 6_000L
 
-    /** 화면 캡처 최소 간격(시스템 제한 약 1/3초) */
-    const val MIN_SHOT_INTERVAL_MS = 350L
+    /** 화면 캡처 최소 간격(시스템 제한 약 1/3초 — 걸리면 코드 3 으로 알려 주고 다시 시도한다) */
+    const val MIN_SHOT_INTERVAL_MS = 330L
 
     /** '앞 단계와 같은 화면'(탭해도 화면이 안 바뀌는 단계)으로 보는 칸 비율 */
     const val SAME = 0.92f
@@ -114,8 +118,9 @@ enum class ScreenVerdict { WAIT, MATCH, TIMEOUT }
 
 /**
  * 기록 때 화면(ref)이 지금 화면으로 나타나기를 기다리는 판정.
- *  - 연속 두 번 맞아야 '나타남'(스크롤/전환 애니메이션이 지나가는 순간에 속지 않도록)
- *  - 평소엔 STRICT, RELAX_AFTER_MS 넘게 안 맞으면 RELAXED 로 완화(배너가 계속 바뀌는 화면 대비)
+ *  - 거의 똑같으면(EXACT) 한 번만 봐도 '나타남' — 스크롤/전환이 끝나 기록 때와 똑같아진 화면
+ *  - 그 정도는 아니면(STRICT 이상) 연속 두 번 맞아야 '나타남'(애니메이션이 지나가는 순간에 속지 않도록)
+ *  - RELAX_AFTER_MS 넘게 안 맞으면 RELAXED 로 완화(배너가 계속 바뀌는 화면 대비)
  *  - 누른 곳 주변은 항상 REGION 이상 같아야 함
  *  - maxWaitMs 를 넘기면 TIMEOUT(그대로 진행)
  */
@@ -138,6 +143,7 @@ class ScreenWait(
         } else {
             val s = ScreenRef.score(ref, cur, fx, fy)
             last = s
+            if (s.global >= ScreenRef.EXACT && s.region >= ScreenRef.EXACT_REGION) return ScreenVerdict.MATCH
             val need = if (elapsed >= ScreenRef.RELAX_AFTER_MS) ScreenRef.RELAXED else ScreenRef.STRICT
             if (s.global >= need && s.region >= ScreenRef.REGION) streak++ else streak = 0
             if (streak >= 2) return ScreenVerdict.MATCH

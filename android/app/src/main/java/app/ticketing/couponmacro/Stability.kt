@@ -37,9 +37,9 @@ object Settle {
     /** 앱을 연 직후 첫 화면이 안정되기를 정각 이후로 더 기다려 주는 한도 */
     const val START_EXTRA_MS = 5_000L
 
-    /** 다음 동작 전 최소 대기: 사람이 기록할 때 기다렸던 시간(0.5~4초). 화면이 안 바뀌는 곳에서도 이만큼은 기다린다. */
+    /** 다음 동작 전 최소 대기: 사람이 기록할 때 기다렸던 시간(0.3~2.5초). 화면이 안 바뀌는 곳에서도 이만큼은 기다린다. */
     fun minWaitMs(nextDelayMs: Long?, isLast: Boolean): Long =
-        if (isLast) LAST_STEP_MIN_MS else (nextDelayMs ?: 600L).coerceIn(500L, 4_000L)
+        if (isLast) LAST_STEP_MIN_MS else (nextDelayMs ?: 600L).coerceIn(300L, 2_500L)
 }
 
 /**

@@ -103,11 +103,12 @@ class MainActivity : Activity() {
         root.addView(button("＋ 시각 추가") { addSlot() })
         nextLine = TextView(this).apply { setPadding(0, dp(8), 0, 0) }
         root.addView(nextLine)
-        autoCb = CheckBox(this).apply { text = "매일 켜진 시각에 자동 실행 (1분 전 잠금 해제 알람)" }
+        autoCb = CheckBox(this).apply { text = "예약 켜짐: 매일 켜진 시각에 자동 실행 (1분 전 잠금 해제 알람)" }
         autoCb.setOnCheckedChangeListener { _, _ ->
             if (!loading) {
                 saveCurrent()
                 refreshNext()
+                refreshStatus() // [예약 시작]/[예약 중지] 버튼 문구
             }
         }
         root.addView(autoCb)
@@ -174,7 +175,8 @@ class MainActivity : Activity() {
         root.addView(statusLine)
         root.addView(
             note(
-                "[예약 시작]: 켜진 다음 회차에 맞춰 — 오픈 5초 전 앱 실행 → 정각에 경로 이동 → 쿠폰 받기 (시점은 고급 설정에서 변경, 실행 중에는 [중지]로 바뀜). " +
+                "[예약 시작]: 켜진 다음 회차에 맞춰 — 오픈 5초 전 앱 실행 → 정각에 경로 이동 → 쿠폰 받기 (시점은 고급 설정에서 변경). " +
+                    "한 번 실행하고 끝나지 않고, 이후 켜진 회차도 매일 이어서 실행합니다(회차 1분 전 알람 → 잠금 해제). 멈추려면 [예약 중지]. " +
                     "[즉시 실행]: 오픈 시각을 기다리지 않고 예약과 똑같은 순서로 지금 해 봅니다 — 앱 실행 → 5초 기다림 → 기록한 경로 이동 → 쿠폰 선택(5초는 고급 설정의 '앱 실행 시점'). 경로가 없으면 지금 보던 화면에서 바로 시도합니다. 상시 받을 수 있는 쿠폰으로 연습하세요. 클릭이 나가면 빨간 점이 잠깐 뜹니다.",
             ),
         )
@@ -306,6 +308,7 @@ class MainActivity : Activity() {
         }
         refreshAppLine()
         refreshRoute()
+        refreshStatus()
     }
 
     private fun resetProfile() {
@@ -320,32 +323,41 @@ class MainActivity : Activity() {
     }
 
     // ---- 동작 ----
-    /** 실행 중이면 [예약 시작] 버튼이 [중지] 역할 */
+    /**
+     * [예약 시작]: 다음 회차를 지금 바로 예약하고, 이후 켜진 회차도 매일 이어서 실행(자동 실행 켬).
+     * 예약이 켜져 있거나 실행 중이면 같은 버튼이 [예약 중지] — 지금 작업과 이후 예약을 모두 끈다.
+     */
     private fun onStartClicked() {
         val svc = MacroService.instance
-        if (svc != null && svc.isRunning()) {
-            svc.cancel()
-            toast("중지했습니다")
+        val running = svc?.isRunning() == true
+        if (running || autoCb.isChecked) {
+            svc?.cancel()
+            if (autoCb.isChecked) autoCb.isChecked = false // 리스너가 저장하고 알람을 취소한다
+            toast("예약을 모두 중지했습니다")
             refreshStatus()
             return
         }
-        run(Mode.LIVE)
+        if (run(Mode.LIVE)) {
+            autoCb.isChecked = true // 리스너가 저장하고 다음 회차 알람을 건다 -> 한 번 실행한 뒤에도 다음 회차가 이어진다
+            refreshStatus()
+        }
     }
 
-    private fun run(mode: Mode) {
+    /** @return 시작했으면 true */
+    private fun run(mode: Mode): Boolean {
         val svc = MacroService.instance
         if (svc == null) {
             toast("접근성 서비스를 먼저 켜세요")
-            return
+            return false
         }
         if (svc.isRecording()) {
             toast("경로 기록 중입니다. 화면 위 [■ 기록 끝]을 먼저 누르세요")
-            return
+            return false
         }
         if (f(K_PKG).isBlank()) {
             toast("대상 앱을 먼저 선택하세요")
             pickApp()
-            return
+            return false
         }
         val form = readForm()
         saveCurrent()
@@ -353,18 +365,23 @@ class MainActivity : Activity() {
         val job = parsed.job
         if (job == null) {
             toast(parsed.error ?: "입력 오류")
-            return
+            return false
         }
-        svc.start(job, mode)
+        if (!svc.start(job, mode)) {
+            toast("이미 실행 중입니다")
+            return false
+        }
         refreshStatus()
         val now = System.currentTimeMillis()
         val when_ = if (mode == Mode.LIVE) " · ${Schedule.describe(job.openAtMillis, now)}에 맞춰 대기" else ""
+        val more = if (mode == Mode.LIVE) "\n이후 켜진 회차도 매일 자동으로 이어서 실행합니다 (멈추려면 [예약 중지])" else ""
         val longWait = if (mode == Mode.LIVE && job.openAtMillis - now > 15 * 60_000L) {
-            "\n오픈까지 한참 남았어요. 그동안 화면이 켜진 채여야 합니다 — 자동 실행(알람)을 켜면 폰을 잠가 둬도 됩니다"
+            "\n오픈까지 한참 남았어요. 그동안 화면이 켜진 채여야 합니다 — 폰을 잠가도 회차 1분 전 알람 후 잠금만 풀면 됩니다"
         } else {
             ""
         }
-        toast("시작됨$when_$longWait")
+        toast("시작됨$when_$more$longWait")
+        return true
     }
 
     private fun refreshStatus() {
@@ -373,11 +390,13 @@ class MainActivity : Activity() {
         accStatus.text = if (on) "접근성: 켜짐" else "접근성: 꺼짐"
         accBox.visibility = if (on) View.GONE else View.VISIBLE
         val running = svc?.isRunning() == true
-        startBtn.text = if (running) "■ 중지" else "▶ 예약 시작"
+        val reserved = autoCb.isChecked // 예약 켜짐: 작업이 끝나도 켜진 회차마다 매일 이어서 실행
+        startBtn.text = if (running || reserved) "■ 예약 중지" else "▶ 예약 시작"
         testBtn.isEnabled = !running
         statusLine.text = when {
             svc?.isRecording() == true -> "● 경로 기록 중 — 쿠폰 페이지까지 이동 후 [■ 기록 끝]"
-            svc?.isRunning() == true -> "▶ 실행 중 · ${LogStore.last()}"
+            running -> "▶ 실행 중 · ${LogStore.last()}"
+            reserved -> "⏰ 예약 켜짐 — 다음 회차를 기다리는 중 (아래 '자동 실행 예정' 참고)"
             else -> "대기 중"
         }
         refreshNext()
