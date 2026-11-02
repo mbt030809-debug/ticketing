@@ -35,6 +35,9 @@ import kotlin.math.roundToInt
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 data class Outcome(val status: String, val attempts: Int, val detail: String)
 
@@ -88,11 +91,6 @@ class MacroService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        // 경로 기록 중에만, 대상 앱에서 눌린 요소의 문구를 기록
-        if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
-            onRecordedClick(event)
-            return
-        }
         // 쿠폰 결과가 토스트로만 뜨는 경우를 위해 토스트 문구만 보관
         if (event.eventType == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED &&
             event.className?.toString()?.contains("Toast") == true
@@ -133,8 +131,10 @@ class MacroService : AccessibilityService() {
     private var recordOverlay: View? = null
     private var recordButton: Button? = null
     private var lastRecordAt = 0L
-    private var lastRecordFx = -1f
-    private var lastRecordFy = -1f
+    private var proxyView: View? = null
+    private var proxyLp: WindowManager.LayoutParams? = null
+    private val proxyPoints = ArrayList<TouchPoint>()
+    private val recordExecutor = Executors.newSingleThreadExecutor() // 기록한 동작을 순서대로 처리
 
     fun isRecording(): Boolean = recordPkg != null
 
@@ -145,8 +145,6 @@ class MacroService : AccessibilityService() {
         recordProfile = profileId
         if (!launch(pkg)) return false
         lastRecordAt = SystemClock.elapsedRealtime()
-        lastRecordFx = -1f
-        lastRecordFy = -1f
         recordPkg = pkg
         showRecordOverlay()
         LogStore.add("경로 기록 시작: 쿠폰 페이지까지 평소처럼 눌러 이동한 뒤 [■ 기록 끝]")
@@ -163,7 +161,7 @@ class MacroService : AccessibilityService() {
         LogStore.add("경로 기록 끝: ${lines.size}단계")
         notifyResult(
             "경로 기록 완료",
-            if (lines.isEmpty()) "기록된 단계가 없습니다 (문구 없는 버튼은 기록되지 않음)" else "${lines.size}단계 저장됨 — 탭해서 앱 열기",
+            if (lines.isEmpty()) "기록된 단계가 없습니다 (화면을 한 번도 누르지 않음)" else "${lines.size}단계 저장됨 — 탭해서 앱 열기",
         )
         try {
             startActivity(
@@ -175,74 +173,120 @@ class MacroService : AccessibilityService() {
         }
     }
 
-    private fun onRecordedClick(event: AccessibilityEvent) {
-        val pkg = recordPkg ?: return
-        if (event.packageName?.toString() != pkg) return
+    /**
+     * 사용자의 터치 한 동작(탭/스와이프)을 기록하고, 같은 동작을 아래 앱에 대신 전달한다.
+     * (기록 중에는 화면 전체를 이 앱의 투명 창이 먼저 받는다 — 어떤 화면이든(웹/직접 그린 화면 포함) 터치 위치로 기록된다)
+     */
+    private fun onRecordedGesture(g: RecordedGesture) {
+        if (recordPkg == null) return
         val dm = resources.displayMetrics
-        val src = event.source
-        val r = Rect()
-        src?.getBoundsInScreen(r)
-        if (src == null || r.isEmpty) {
-            LogStore.add("기록: 눌린 곳의 위치를 알 수 없어 건너뜀 — 이동 단계에 직접 추가하세요")
-            return
-        }
-        val fx = r.exactCenterX() / dm.widthPixels
-        val fy = r.exactCenterY() / dm.heightPixels
         val now = SystemClock.elapsedRealtime()
         val gap = now - lastRecordAt
-        // 같은 클릭이 부모/자식 요소에서 두 번 보고되는 경우를 무시
-        if (kotlin.math.abs(fx - lastRecordFx) < 0.002f && kotlin.math.abs(fy - lastRecordFy) < 0.002f && gap < 400) return
-        val label = clickLabel(event)
-        val line = RouteSteps.line(label, fx, fy, gap, POPUP_WORDS) ?: return
         lastRecordAt = now
-        lastRecordFx = fx
-        lastRecordFy = fy
-        showDot(fx * dm.widthPixels, fy * dm.heightPixels, Color.BLUE)
+        // 팝업 닫기 류인지: 탭이 팝업을 닫아 버리기 전에 확인
+        val popup = if (g.kind == GestureKind.TAP) popupLabelAt(g.x1, g.y1) else null
+        val line = RouteSteps.line(g, dm.widthPixels, dm.heightPixels, gap, popup)
         val n = synchronized(recorded) {
             recorded += line
             recorded.size
         }
-        LogStore.add("기록 $n: 위치 ${(fx * 100).toInt()}%,${(fy * 100).toInt()}% · 이전 클릭 후 ${gap / 100 / 10.0}초" + (if (label != null) " ('$label')" else ""))
+        showDot(g.x1, g.y1, Color.BLUE)
+        val what = if (g.kind == GestureKind.SWIPE) {
+            "스와이프 ${(g.x1 * 100 / dm.widthPixels).toInt()}%,${(g.y1 * 100 / dm.heightPixels).toInt()}% → ${(g.x2 * 100 / dm.widthPixels).toInt()}%,${(g.y2 * 100 / dm.heightPixels).toInt()}%"
+        } else {
+            "탭 ${(g.x1 * 100 / dm.widthPixels).toInt()}%,${(g.y1 * 100 / dm.heightPixels).toInt()}%" + if (g.durMs >= Gestures.LONG_PRESS_MS) " (길게 ${g.durMs}ms)" else ""
+        }
+        LogStore.add("기록 $n: $what · 이전 동작 후 ${gap / 100 / 10.0}초" + (if (popup != null) " · 팝업 '$popup'(없어도 진행)" else ""))
         main.post { recordButton?.text = "■ 기록 끝 (${n}단계)" }
+
+        // 같은 동작을 아래 앱에 전달하는 동안만 투명 창이 터치를 통과시킨다
+        setProxyTouchable(false)
+        val done = CountDownLatch(1)
+        val ok = gesture(
+            g.x1, g.y1, g.x2, g.y2, g.durMs,
+            object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) = done.countDown()
+                override fun onCancelled(gestureDescription: GestureDescription?) = done.countDown()
+            },
+        )
+        if (ok) done.await(g.durMs + 1_500, TimeUnit.MILLISECONDS) else LogStore.add("기록: 동작을 앱에 전달하지 못했습니다")
+        Thread.sleep(60)
+        setProxyTouchable(true)
     }
 
-    private fun clickLabel(event: AccessibilityEvent): String? {
-        fun clean(raw: String?) = raw?.replace(Regex("\\s+"), " ")?.trim()?.take(40)?.takeIf { it.isNotEmpty() }
-        val direct = event.text.firstOrNull()?.toString()?.takeIf { it.isNotBlank() }
-            ?: event.contentDescription?.toString()?.takeIf { it.isNotBlank() }
-        clean(direct)?.let { return it }
-        val src = event.source ?: return null
-        clean(firstLabel(src, 3))?.let { return it }
-        // 아이콘만 눌린 경우: 같은 칸(작은 상위 영역) 안의 이름표 글자를 찾는다 (예: 아이콘 아래 이름). 목록 전체처럼 큰 영역은 제외
-        val dm = resources.displayMetrics
-        var a: AccessibilityNodeInfo? = src.parent
-        var depth = 0
-        while (a != null && depth < 3) {
-            val r = Rect()
-            a.getBoundsInScreen(r)
-            if (r.width() > dm.widthPixels * 0.45 || r.height() > dm.heightPixels * 0.25) break
-            clean(firstLabel(a, 2))?.let { return it }
-            a = a.parent
-            depth++
+    /** (x, y) 위치에 있는 팝업 닫기 류 버튼의 글자. 아니면 null */
+    private fun popupLabelAt(x: Float, y: Float): String? {
+        val root = rootInActiveWindow
+            ?: windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }?.root
+            ?: return null
+        val r = Rect()
+        for (w in POPUP_WORDS) {
+            for (n in root.findAccessibilityNodeInfosByText(w)) {
+                n.getBoundsInScreen(r)
+                if (r.contains(x.toInt(), y.toInt())) return w
+            }
         }
         return null
     }
 
-    private fun firstLabel(n: AccessibilityNodeInfo, depth: Int): String? {
-        n.text?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
-        n.contentDescription?.toString()?.takeIf { it.isNotBlank() }?.let { return it }
-        if (depth <= 0) return null
-        for (i in 0 until n.childCount) {
-            val c = n.getChild(i) ?: continue
-            firstLabel(c, depth - 1)?.let { return it }
+    /** 투명 창의 터치 가로채기를 켜고 끈다. 반영될 때까지 기다린다(꺼지기 전에 동작을 보내면 자기 창이 받아 버림). */
+    private fun setProxyTouchable(on: Boolean) {
+        val applied = CountDownLatch(1)
+        main.post {
+            try {
+                val v = proxyView
+                val lp = proxyLp
+                if (v != null && lp != null) {
+                    val base = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                    lp.flags = if (on) base else base or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                    (getSystemService(WINDOW_SERVICE) as WindowManager).updateViewLayout(v, lp)
+                }
+            } catch (_: Exception) {
+            } finally {
+                applied.countDown()
+            }
         }
-        return null
+        applied.await(500, TimeUnit.MILLISECONDS)
+        if (!on) Thread.sleep(30) // 창 변경이 입력 시스템에 닿을 시간
     }
 
     private fun showRecordOverlay() {
         main.post {
             try {
                 val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                val dm = resources.displayMetrics
+                val slop = 16 * dm.density
+                // 1) 터치를 먼저 받는 투명 창: 기록하고, 같은 동작을 아래 앱에 대신 전달
+                val proxy = View(this)
+                proxy.setOnTouchListener { _, ev ->
+                    when (ev.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            proxyPoints.clear()
+                            proxyPoints += TouchPoint(ev.rawX, ev.rawY, ev.eventTime)
+                        }
+                        MotionEvent.ACTION_MOVE -> if (ev.pointerCount == 1) proxyPoints += TouchPoint(ev.rawX, ev.rawY, ev.eventTime)
+                        MotionEvent.ACTION_UP -> {
+                            proxyPoints += TouchPoint(ev.rawX, ev.rawY, ev.eventTime)
+                            val g = Gestures.classify(proxyPoints.toList(), slop)
+                            proxyPoints.clear()
+                            if (g != null) recordExecutor.execute { onRecordedGesture(g) }
+                        }
+                        MotionEvent.ACTION_CANCEL -> proxyPoints.clear()
+                    }
+                    true
+                }
+                val plp = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT,
+                )
+                wm.addView(proxy, plp)
+                proxyView = proxy
+                proxyLp = plp
+
+                // 2) [■ 기록 끝] 버튼 (투명 창 위)
                 val b = Button(this).apply {
                     text = "■ 기록 끝 (0단계)"
                     setOnClickListener { stopRecording() }
@@ -256,23 +300,28 @@ class MacroService : AccessibilityService() {
                     PixelFormat.TRANSLUCENT,
                 ).apply {
                     gravity = Gravity.TOP or Gravity.END
-                    y = (96 * resources.displayMetrics.density).toInt()
+                    y = (96 * dm.density).toInt()
                 }
                 wm.addView(b, lp)
                 recordOverlay = b
             } catch (e: Exception) {
-                LogStore.add("기록 버튼 표시 실패: $e")
+                LogStore.add("기록 화면 표시 실패: $e")
             }
         }
     }
 
     private fun hideRecordOverlay() {
         main.post {
-            try {
-                recordOverlay?.let { (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(it) }
-            } catch (_: Exception) {
+            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+            for (v in listOf(recordOverlay, proxyView)) {
+                try {
+                    if (v != null) wm.removeView(v)
+                } catch (_: Exception) {
+                }
             }
             recordOverlay = null
+            proxyView = null
+            proxyLp = null
         }
     }
 
@@ -655,12 +704,16 @@ class MacroService : AccessibilityService() {
      * 글자 단계: 글자가 보이면 클릭(위치 힌트가 있으면 같은 글자 중 힌트에 가장 가까운 것), 아이콘 단계: 저장한 화면 비율 위치를 탭.
      */
     private fun runStep(job: Job, s: Step, timeoutMs: Long): Boolean {
-        if (s.isTap) {
+        if (s.isSwipe || s.isTap) {
             if (!waitForeground(job, timeoutMs)) return false
             val dm = resources.displayMetrics
-            val x = s.hintX!! * dm.widthPixels
-            val y = s.hintY!! * dm.heightPixels
-            val ok = gesture(x, y, x, y, 40)
+            val fx = s.hintX ?: return false
+            val fy = s.hintY ?: return false
+            val x = fx * dm.widthPixels
+            val y = fy * dm.heightPixels
+            val ex = (s.endX ?: fx) * dm.widthPixels
+            val ey = (s.endY ?: fy) * dm.heightPixels
+            val ok = gesture(x, y, ex, ey, s.durMs ?: if (s.isSwipe) 300L else Gestures.TAP_MS)
             if (ok) showDot(x, y, Color.RED)
             return ok
         }
@@ -1231,7 +1284,10 @@ class MacroService : AccessibilityService() {
         return gesture(x, dm.heightPixels * 0.3f, x, dm.heightPixels * 0.75f, 200)
     }
 
-    private fun gesture(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long): Boolean {
+    private fun gesture(
+        x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long,
+        callback: AccessibilityService.GestureResultCallback? = null,
+    ): Boolean {
         val p = Path().apply {
             moveTo(x1, y1)
             if (x1 != x2 || y1 != y2) lineTo(x2, y2)
@@ -1239,7 +1295,7 @@ class MacroService : AccessibilityService() {
         val g = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(p, 0, durationMs))
             .build()
-        return dispatchGesture(g, null, null)
+        return dispatchGesture(g, callback, null)
     }
 
     /**

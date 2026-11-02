@@ -54,24 +54,55 @@ class JobTest {
     }
 
     @Test
-    fun routeRecordingStoresPositionsAndGapsOnly() {
-        val words = listOf("닫기", "나중에")
+    fun stepsParseSwipesAndLongPresses() {
+        val steps = Parse.steps("S@0.5000,0.7000>0.5000,0.3000#350~900\n@0.2,0.3#800~100\n?S@0.1,0.2>0.9,0.2")
+        assertEquals(
+            listOf(
+                Step("", false, 0.5f, 0.7f, 900, 0.5f, 0.3f, 350),
+                Step("", false, 0.2f, 0.3f, 100, null, null, 800),
+                Step("", true, 0.1f, 0.2f, null, 0.9f, 0.2f, null),
+            ),
+            steps,
+        )
+        assertTrue(steps[0].isSwipe)
+        assertFalse(steps[0].isTap)
+        assertTrue(steps[1].isTap)
+        assertFalse(steps[1].isSwipe)
+        assertEquals("(스와이프 50%,70%→50%,30%)", steps[0].display())
+        assertEquals("(탭 20%,30%)", steps[1].display())
+        assertEquals("?(스와이프 10%,20%→90%,20%)", steps[2].display())
+    }
+
+    @Test
+    fun routeRecordingStoresTouchesAsPositionsAndGaps() {
+        val w = 1000
+        val h = 2000
+        val tap = RecordedGesture(GestureKind.TAP, 200f, 700f, 200f, 700f, Gestures.TAP_MS)
         // 눌린 위치와 간격이 핵심 — 글자는 저장하지 않는다
-        assertEquals("@0.2000,0.3500~1200", RouteSteps.line("녭다세일", 0.2f, 0.35f, 1200, words))
-        assertEquals("@0.5000,0.9000", RouteSteps.line(null, 0.5f, 0.9f, null, words))
+        assertEquals("@0.2000,0.3500~1200", RouteSteps.line(tap, w, h, 1200, null))
+        assertEquals("@0.2000,0.3500", RouteSteps.line(tap, w, h, null, null))
         // 팝업 닫기 류는 매번 뜨지 않으므로 '없어도 진행'
-        assertEquals("?닫기@0.5000,0.8000~400", RouteSteps.line("닫기", 0.5f, 0.8f, 400, words))
-        // 위치를 모르면 기록 불가
-        assertNull(RouteSteps.line("x", null, 0.5f, 100, words))
-        assertNull(RouteSteps.line("x", 0.5f, null, 100, words))
+        assertEquals("?닫기@0.2000,0.3500~400", RouteSteps.line(tap, w, h, 400, "닫기"))
+        // 길게 누르기는 누른 시간을 함께
+        val hold = RecordedGesture(GestureKind.TAP, 500f, 1800f, 500f, 1800f, 800)
+        assertEquals("@0.5000,0.9000#800~100", RouteSteps.line(hold, w, h, 100, null))
+        // 스와이프(스크롤)도 시작→끝 위치와 걸린 시간으로 기록
+        val swipe = RecordedGesture(GestureKind.SWIPE, 500f, 1400f, 500f, 600f, 350)
+        assertEquals("S@0.5000,0.7000>0.5000,0.3000#350~900", RouteSteps.line(swipe, w, h, 900, null))
         // 기록한 줄들은 그대로 다시 읽혀 같은 순서로 재생된다
         val lines = listOf(
-            RouteSteps.line("a", 0.1f, 0.2f, 900, words)!!,
-            RouteSteps.line("닫기", 0.5f, 0.8f, 300, words)!!,
-            RouteSteps.line(null, 0.7f, 0.6f, 1500, words)!!,
+            RouteSteps.line(tap, w, h, 900, null),
+            RouteSteps.line(tap, w, h, 300, "닫기"),
+            RouteSteps.line(swipe, w, h, 1500, null),
+            RouteSteps.line(hold, w, h, null, null),
         )
         assertEquals(
-            listOf(Step("", false, 0.1f, 0.2f, 900), Step("닫기", true, 0.5f, 0.8f, 300), Step("", false, 0.7f, 0.6f, 1500)),
+            listOf(
+                Step("", false, 0.2f, 0.35f, 900),
+                Step("닫기", true, 0.2f, 0.35f, 300),
+                Step("", false, 0.5f, 0.7f, 1500, 0.5f, 0.3f, 350),
+                Step("", false, 0.5f, 0.9f, null, null, null, 800),
+            ),
             Parse.steps(lines.joinToString("\n")),
         )
     }

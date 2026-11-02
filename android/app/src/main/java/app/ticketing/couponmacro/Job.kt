@@ -10,10 +10,11 @@ import java.time.temporal.ChronoUnit
 enum class Mode { LIVE, NOW, DRY }
 
 /**
- * 이동 단계 한 칸 — 경로는 '눌렀던 위치'를 기억해 같은 순서·간격으로 다시 누르는 방식이 기본이다.
- *  - 위치 탭:          "@0.2000,0.3500~1200"  화면 비율 위치를 탭. ~뒤는 사람이 이전 클릭 후 기다린 시간(ms, 재생 시 최대 3초)
- *  - 글자 단계:        "혜택"                 글자가 보이면 클릭 (직접 적을 때)
- *  - 글자 + 위치 힌트: "혜택@0.20,0.35"        같은 글자가 여러 곳이면 힌트에 가장 가까운 것을 클릭
+ * 이동 단계 한 칸 — 경로는 '내가 한 터치(위치)'를 그대로 기억해 같은 순서·간격으로 다시 하는 방식이다.
+ *  - 탭:        "@0.2000,0.3500~1200"            화면 비율 위치를 탭. ~뒤는 이전 동작 후 사람이 기다린 시간(ms, 재생 시 최대 3초)
+ *  - 길게 누르기: "@0.2000,0.3500#800~1200"        #뒤는 누른 시간(ms)
+ *  - 스와이프:   "S@0.50,0.70>0.50,0.30#350~900"   시작→끝 위치, #뒤는 걸린 시간(ms) — 스크롤도 기록된다
+ *  - 글자 단계:  "혜택" / "혜택@0.20,0.35"         직접 적을 때(같은 글자가 여러 곳이면 힌트에 가장 가까운 것)
  *  - 앞에 ? 를 붙이면 없어도 진행(optional) — 팝업 닫기처럼 매번 뜨지 않는 것
  */
 data class Step(
@@ -22,26 +23,46 @@ data class Step(
     val hintX: Float? = null,
     val hintY: Float? = null,
     val delayMs: Long? = null,
+    val endX: Float? = null,
+    val endY: Float? = null,
+    val durMs: Long? = null,
 ) {
+    /** 스와이프 단계 */
+    val isSwipe: Boolean get() = hintX != null && hintY != null && endX != null && endY != null
+
     /** 글자 없이 위치만으로 탭하는 단계 */
-    val isTap: Boolean get() = text.isEmpty() && hintX != null && hintY != null
+    val isTap: Boolean get() = text.isEmpty() && hintX != null && hintY != null && !isSwipe
 
     /** 화면/리포트 표시용 */
-    fun display(): String = (if (optional) "?" else "") +
-        if (isTap) "(탭 ${(hintX!! * 100).toInt()}%,${(hintY!! * 100).toInt()}%)" else text
+    fun display(): String = (if (optional) "?" else "") + when {
+        isSwipe -> "(스와이프 ${pct(hintX)},${pct(hintY)}→${pct(endX)},${pct(endY)})"
+        isTap -> "(탭 ${pct(hintX)},${pct(hintY)})"
+        else -> text
+    }
+
+    private fun pct(v: Float?) = "${((v ?: 0f) * 100).toInt()}%"
 }
 
-/** 경로 기록: 눌린 위치와 간격을 이동 단계 한 줄로 만든다 (순수 함수) */
+/** 경로 기록: 한 번의 터치 동작을 이동 단계 한 줄로 만든다 (순수 함수) */
 object RouteSteps {
+    private fun frac(v: Float, size: Int) = String.format(java.util.Locale.ROOT, "%.4f", v / size)
+
     /**
-     * fx/fy: 눌린 위치의 화면 비율(모르면 null → 기록 불가), delayMs: 이전 클릭 후 흐른 시간.
-     * 글자는 저장하지 않는다(위치만). 단, 팝업 닫기 류("닫기" 등)는 매번 뜨지 않으므로 '없어도 진행'(?글자) 단계로 저장.
+     * g: 사용자가 한 터치(px), widthPx/heightPx: 화면 크기, gapMs: 이전 동작 후 흐른 시간,
+     * popupLabel: 눌린 곳이 팝업 닫기 류("닫기" 등)면 그 글자(없어도 진행하는 '?글자' 단계로 저장), 아니면 null.
+     * 글자는 저장하지 않는다(위치만).
      */
-    fun line(label: String?, fx: Float?, fy: Float?, delayMs: Long?, popupWords: List<String>): String? {
-        if (fx == null || fy == null) return null
-        val pos = String.format(java.util.Locale.ROOT, "@%.4f,%.4f", fx, fy) + (if (delayMs != null) "~${delayMs.coerceAtLeast(0)}" else "")
-        val text = label?.replace('@', ' ')?.replace('~', ' ')?.trim().orEmpty()
-        return if (text.isNotEmpty() && popupWords.any { it == text }) "?$text$pos" else pos
+    fun line(g: RecordedGesture, widthPx: Int, heightPx: Int, gapMs: Long?, popupLabel: String?): String {
+        val gap = if (gapMs != null) "~${gapMs.coerceAtLeast(0)}" else ""
+        return when (g.kind) {
+            GestureKind.SWIPE ->
+                "S@${frac(g.x1, widthPx)},${frac(g.y1, heightPx)}>${frac(g.x2, widthPx)},${frac(g.y2, heightPx)}#${g.durMs}$gap"
+            GestureKind.TAP -> {
+                val text = popupLabel?.replace('@', ' ')?.replace('~', ' ')?.replace('#', ' ')?.trim().orEmpty()
+                val hold = if (g.durMs >= Gestures.LONG_PRESS_MS) "#${g.durMs}" else ""
+                (if (text.isNotEmpty()) "?$text" else "") + "@${frac(g.x1, widthPx)},${frac(g.y1, heightPx)}$hold$gap"
+            }
+        }
     }
 }
 
@@ -88,18 +109,29 @@ object Parse {
     fun coupons(s: String): List<String> =
         s.split('\n', ';').map { it.trim() }.filter { it.isNotEmpty() }
 
-    private val STEP_POS = Regex("^(.*?)@([0-9]*\\.?[0-9]+)\\s*,\\s*([0-9]*\\.?[0-9]+)(?:~([0-9]+))?$")
+    private const val NUM = "([0-9]*\\.?[0-9]+)"
+    private val STEP_SWIPE = Regex("^S@" + NUM + "\\s*,\\s*" + NUM + ">" + NUM + "\\s*,\\s*" + NUM + "(?:#([0-9]+))?(?:~([0-9]+))?$")
+    private val STEP_POS = Regex("^(.*?)@" + NUM + "\\s*,\\s*" + NUM + "(?:#([0-9]+))?(?:~([0-9]+))?$")
 
     /** 한 줄에 하나(Step 설명 참고). 앞에 ? 를 붙이면 optional(못 찾아도 계속). */
     fun steps(s: String): List<Step> =
         s.lines().map { it.trim() }.filter { it.isNotEmpty() }.mapNotNull { raw ->
             val optional = raw.startsWith("?")
             val body = raw.removePrefix("?").trim()
+            val sw = STEP_SWIPE.matchEntire(body)
             val m = STEP_POS.matchEntire(body)
-            if (m != null) {
+            if (sw != null) {
+                val v = (1..4).map { sw.groupValues[it].toFloatOrNull() }
+                if (v.any { it == null }) null
+                else Step("", optional, v[0], v[1], sw.groupValues[6].toLongOrNull(), v[2], v[3], sw.groupValues[5].toLongOrNull())
+            } else if (m != null) {
                 val fx = m.groupValues[2].toFloatOrNull()
                 val fy = m.groupValues[3].toFloatOrNull()
-                if (fx != null && fy != null) Step(m.groupValues[1].trim(), optional, fx, fy, m.groupValues[4].toLongOrNull()) else null
+                if (fx != null && fy != null) {
+                    Step(m.groupValues[1].trim(), optional, fx, fy, m.groupValues[5].toLongOrNull(), null, null, m.groupValues[4].toLongOrNull())
+                } else {
+                    null
+                }
             } else if (body.isNotEmpty()) {
                 Step(body, optional)
             } else {
