@@ -684,12 +684,40 @@ class MacroService : AccessibilityService() {
     }
 
     /**
+     * 수동 페이지: 사용자가 쿠폰 페이지를 직접 열어 둔다. 오픈 launchLeadMs 전에 대상 앱이 앞에 없으면 앞으로 가져오고
+     * (열어 둔 화면 그대로), 정각에 한 번 새로고침한 뒤 쿠폰이 보이는 즉시 받는다. 받을 때까지 3초마다 새로고침.
+     */
+    private fun executeManualPage(job: Job, offset: Long): Outcome {
+        val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.KOREA)
+        val tl = Flow.timeline(job)
+        LogStore.add("수동 페이지: 쿠폰 페이지를 열어 두세요 — 정각 ${fmt.format(Date(tl.fireAtMs))}에 새로고침하고 바로 받습니다")
+        waitUntil(tl.launchAtMs, offset)
+        if (targetRoot(job) == null) {
+            if (!launch(job.pkg, fresh = false)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
+            LogStore.add("대상 앱을 앞으로 가져옴(열어 둔 화면 유지)")
+            if (!waitForeground(job, 3_000)) {
+                LogStore.add("대상 앱이 앞으로 나오지 않았습니다 — 쿠폰 페이지를 열어 주세요")
+                Alerts.warn(this, "쿠폰 페이지를 열어 주세요", "${job.name}: 대상 앱의 쿠폰 페이지를 열어 두면 정각에 자동으로 받습니다")
+            }
+        }
+        waitUntil(tl.fireAtMs, offset)
+        if (Flow.plan(job, Mode.LIVE, appInFront = true).refreshAtOpen && targetRoot(job) != null) {
+            swipeDown()
+            LogStore.add("정각 — 새로고침 후 쿠폰 받기 시작")
+        } else {
+            LogStore.add("정각 — 쿠폰 받기 시작")
+        }
+        return clickLoop(job, Mode.LIVE)
+    }
+
+    /**
      * 예약 실행(기본 흐름): 오픈 launchLeadMs(기본 5초) 전 앱 실행 → 오픈 정각(lead 보정)에 경로 이동 → 쿠폰 받기.
      * 경로 이동은 정각에 시작하므로 단계마다 오래 기다리지 않고, 마지막에만 짧게 화면 로딩 완료를 확인한 뒤 쿠폰을 누른다.
      */
     private fun executeAtOpen(job: Job, offset: Long): Outcome {
         val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.KOREA)
-        val plan = Flow.plan(job, Mode.LIVE, appInFront = false)
+        val plan = Flow.plan(job, Mode.LIVE, appInFront = targetRoot(job) != null)
+        if (plan.manualPage) return executeManualPage(job, offset)
         val hasRoute = plan.replayRoute
         val tl = Flow.timeline(job)
         val launchAt = tl.launchAtMs
@@ -772,7 +800,7 @@ class MacroService : AccessibilityService() {
         }
 
         // 예약 실행(기본): 오픈 N초 전 앱 실행 → 정각에 경로 이동 → 쿠폰 받기
-        if (mode == Mode.LIVE && job.routeAtOpen) return executeAtOpen(job, offset)
+        if (mode == Mode.LIVE && (job.routeAtOpen || job.manualPage)) return executeAtOpen(job, offset)
 
         // (경로 이동을 미리 해 두는 방식 / 테스트) 단계 구성은 Flow.plan 이 정한다 (단위 테스트로 고정)
         val plan = Flow.plan(job, mode, appInFront = targetRoot(job) != null)
@@ -830,8 +858,15 @@ class MacroService : AccessibilityService() {
         var misses = 0
         var ambiguousLogged = false
         val maxAttempts = if (mode == Mode.DRY) minOf(job.maxAttempts, 15) else job.maxAttempts
+        val periodicRefresh = Flow.plan(job, mode, appInFront = true).refreshAtOpen
+        var lastRefreshAt = SystemClock.elapsedRealtime()
         for (attempt in 1..maxAttempts) {
             checkCancel()
+            // 수동 페이지: 받을 때까지 3초마다 화면을 당겨 새로고침 (정각에 아직 카드가 안 열렸을 수 있음)
+            if (periodicRefresh && SystemClock.elapsedRealtime() - lastRefreshAt >= 3_000 && !done.keys.containsAll(job.coupons)) {
+                lastRefreshAt = SystemClock.elapsedRealtime()
+                if (swipeDown()) LogStore.add("#$attempt 새로고침")
+            }
             val root = targetRoot(job)
             var foundAny = false
             if (root != null) {

@@ -37,7 +37,11 @@ class AlarmReceiver : BroadcastReceiver() {
         Alerts.warn(
             ctx,
             "$title — ${Schedule.describe(occ, now)}",
-            "지금 화면 잠금을 해제하고 폰을 켜 두세요. 앱이 자동으로 열려 쿠폰 페이지로 이동합니다.",
+            if (form.manualPage) {
+                "화면 잠금을 풀고 대상 앱에서 쿠폰 페이지를 열어 두세요. 정각에 자동으로 새로고침하고 받습니다."
+            } else {
+                "지금 화면 잠금을 해제하고 폰을 켜 두세요. 앱이 자동으로 열려 쿠폰 페이지로 이동합니다."
+            },
         )
 
         val parsed = form.copy(openAt = Schedule.formatOpenAt(occ)).toJob(requireOpenAt = true)

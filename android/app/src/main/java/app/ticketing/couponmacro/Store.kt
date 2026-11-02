@@ -37,6 +37,7 @@ object Store {
             .putString("slotsOff", f.slotsOff)
             .putBoolean("autoRun", f.autoRun)
             .putString("eventUrl", f.eventUrl)
+            .putBoolean("manualPage", f.manualPage)
             .putBoolean("routeAtOpen", f.routeAtOpen)
             .putString("launchLeadSec", f.launchLeadSec)
             .putString("warnSec", f.warnSec)
@@ -140,6 +141,12 @@ object Store {
             slotsOff = slotsOff,
             autoRun = p.getBoolean("autoRun", d.autoRun),
             eventUrl = p.getString("eventUrl", d.eventUrl).orEmpty(),
+            // 이전 버전에서 경로/링크를 설정해 둔 사람은 기존 방식을 유지, 처음 쓰는 사람은 '직접 열어 둠'이 기본
+            manualPage = if (p.contains("manualPage")) {
+                p.getBoolean("manualPage", d.manualPage)
+            } else {
+                p.getString("steps", "").orEmpty().isBlank() && p.getString("eventUrl", "").orEmpty().isBlank()
+            },
             routeAtOpen = p.getBoolean("routeAtOpen", d.routeAtOpen),
             launchLeadSec = p.getString("launchLeadSec", d.launchLeadSec).orEmpty().ifBlank { d.launchLeadSec },
             warnSec = p.getString("warnSec", d.warnSec).orEmpty().ifBlank { d.warnSec },

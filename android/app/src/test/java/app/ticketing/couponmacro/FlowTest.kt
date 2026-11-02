@@ -22,6 +22,12 @@ class FlowTest {
     ): Job = FormState(
         pkg = "a.b", targets = "x", coupons = "c", steps = steps, launchApp = launchApp,
         routeAtOpen = routeAtOpen, refreshOnMiss = refresh, openAt = "2026-11-05 10:00:00",
+        manualPage = false, // 이 파일의 기본 시나리오는 링크/경로 방식. 수동 페이지는 아래 manualJob 으로
+    ).toJob(requireOpenAt = true).job!!
+
+    private fun manualJob(refresh: Boolean = true, routeAtOpen: Boolean = true): Job = FormState(
+        pkg = "a.b", targets = "x", coupons = "c", steps = route, eventUrl = "https://x.y/z", refreshOnMiss = refresh,
+        routeAtOpen = routeAtOpen, manualPage = true, openAt = "2026-11-05 10:00:00",
     ).toJob(requireOpenAt = true).job!!
 
     @Test
@@ -87,7 +93,7 @@ class FlowTest {
     fun eventLinkReplacesTheRouteButKeepsItAsFallback() {
         val withLink = FormState(
             pkg = "a.b", targets = "x", coupons = "c", steps = route, eventUrl = "https://link.coupang.com/a/abc",
-            openAt = "2026-11-05 10:00:00",
+            openAt = "2026-11-05 10:00:00", manualPage = false,
         ).toJob(requireOpenAt = true).job!!
         for (mode in listOf(Mode.LIVE, Mode.NOW, Mode.DRY)) {
             val p = Flow.plan(withLink, mode, appInFront = true)
@@ -99,6 +105,44 @@ class FlowTest {
         val noLink = Flow.plan(job(route), Mode.LIVE, appInFront = false)
         assertFalse(noLink.useLink)
         assertTrue(noLink.freshStart)
+    }
+
+    @Test
+    fun manualPageIgnoresRouteAndLinkAndRefreshesAtOpen() {
+        // "쿠폰 페이지는 내가 열어 둘 테니 정각에 알아서 받아라": 링크/경로가 있어도 쓰지 않는다
+        val p = Flow.plan(manualJob(), Mode.LIVE, appInFront = true)
+        assertTrue(p.manualPage)
+        assertTrue(p.atOpen)
+        assertFalse(p.useLink)
+        assertFalse(p.replayRoute)
+        assertFalse(p.freshStart)
+        assertTrue("정각에 새로고침 + 주기적 새로고침", p.refreshAtOpen)
+        assertTrue(p.waitForOpen)
+    }
+
+    @Test
+    fun manualPageBringsAppToFrontOnlyIfNeededAndNeverResetsIt() {
+        val front = Flow.plan(manualJob(), Mode.LIVE, appInFront = true)
+        assertFalse("이미 열려 있으면 건드리지 않는다", front.launch)
+        val back = Flow.plan(manualJob(), Mode.LIVE, appInFront = false)
+        assertTrue("다른 앱이 앞이면 열어 둔 화면 그대로 앞으로", back.launch)
+        assertFalse("첫 화면으로 초기화하면 열어 둔 페이지가 사라진다", back.freshStart)
+    }
+
+    @Test
+    fun manualPageStaysOnTheLiveFlowEvenIfRouteAtOpenIsOff() {
+        assertTrue(Flow.plan(manualJob(routeAtOpen = false), Mode.LIVE, appInFront = true).atOpen)
+    }
+
+    @Test
+    fun manualPageTestsAndRefreshOffNeverPull() {
+        for (mode in listOf(Mode.NOW, Mode.DRY)) {
+            val p = Flow.plan(manualJob(), mode, appInFront = true)
+            assertFalse(p.refreshAtOpen)
+            assertFalse(p.pullRefreshOnMiss)
+            assertFalse(p.replayRoute)
+        }
+        assertFalse(Flow.plan(manualJob(refresh = false), Mode.LIVE, appInFront = true).refreshAtOpen)
     }
 
     @Test

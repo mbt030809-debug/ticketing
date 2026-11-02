@@ -22,6 +22,7 @@ object DebugReport {
             appendLine("이벤트: $profileLabel · 앱: ${form.pkg.ifBlank { "(미지정)" }}")
             appendLine("회차: 전체 [$all] / 켜짐 [$on] · 자동 실행: ${if (form.autoRun) "켜짐(알람 ${form.warnSec}초 전)" else "꺼짐"}")
             appendLine("예약 흐름: ${if (form.routeAtOpen) "오픈 ${form.launchLeadSec}초 전 앱 실행 → 정각 경로 이동" else "미리 이동 후 대기"} · 새로고침 ${if (form.refreshOnMiss) "사용" else "안 함"} · 클릭 점 ${if (form.showDots) "표시" else "숨김"}")
+            appendLine("쿠폰 페이지: ${if (form.manualPage) "내가 직접 열어 둠(수동)" else "링크/경로로 이동"}")
             appendLine("이벤트 링크: ${form.eventUrl.ifBlank { "(없음)" }}")
             appendLine("경로 ${steps.size}단계: " + steps.joinToString(" → ") { it.display() })
             appendLine("받을 쿠폰 ${coupons.size}개: " + coupons.joinToString(" | "))

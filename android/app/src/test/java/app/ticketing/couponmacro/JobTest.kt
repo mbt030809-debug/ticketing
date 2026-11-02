@@ -164,6 +164,13 @@ class JobTest {
     }
 
     @Test
+    fun manualPageIsTheDefaultForNewUsers() {
+        val job = FormState(pkg = "a.b", targets = "x", coupons = "c").toJob(false).job!!
+        assertTrue(job.manualPage)
+        assertFalse(FormState(pkg = "a.b", targets = "x", coupons = "c", manualPage = false).toJob(false).job!!.manualPage)
+    }
+
+    @Test
     fun launchLeadMustBeBetweenZeroAndSixHundredSeconds() {
         val base = FormState(pkg = "a.b", targets = "x", coupons = "c")
         assertNotNull(base.copy(launchLeadSec = "-1").toJob(false).error)
