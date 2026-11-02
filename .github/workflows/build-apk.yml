@@ -7,6 +7,9 @@ on:
       - ".github/workflows/build-apk.yml"
   workflow_dispatch:
 
+permissions:
+  contents: write   # 릴리스 생성용
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,20 +23,57 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Unit tests + debug APK
+      # 서명 키는 저장소에 두지 않고 GitHub Secrets 로만 주입한다.
+      - name: Prepare signing key
+        id: sign
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KS_B64" ] && [ -n "$KS_PW" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "path=$RUNNER_TEMP/release.keystore" >> "$GITHUB_OUTPUT"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::서명 키 시크릿(ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD) 없음 -> 디버그 키 서명(업데이트 불가). 릴리스 생략."
+          fi
+
+      - name: Unit tests + release APK
         working-directory: android
-        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ steps.sign.outputs.path }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: ./gradlew --no-daemon testDebugUnitTest assembleRelease -PappVersionCode=${{ github.run_number }}
 
       - name: Name APK with build date (KST)
         id: apk
         run: |
           D=$(TZ=Asia/Seoul date +%Y%m%d)
           mkdir -p out
-          cp android/app/build/outputs/apk/debug/app-debug.apk "out/couponmacro_${D}.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk "out/couponmacro_${D}.apk"
           echo "date=${D}" >> "$GITHUB_OUTPUT"
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs "out/couponmacro_${D}.apk" | grep -i "SHA-256" || true
 
       - uses: actions/upload-artifact@v4
         with:
           name: couponmacro_${{ steps.apk.outputs.date }}
           path: out/*.apk
           if-no-files-found: error
+
+      # 앱 내 업데이트가 읽는 최신 릴리스. 올바른 키로 서명된 빌드만 게시한다.
+      - name: Publish release
+        if: steps.sign.outputs.signed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_NO: ${{ github.run_number }}
+        run: |
+          SUBJECT=$(git log -1 --pretty=%s)
+          gh release create "build-${RUN_NO}" out/*.apk \
+            --target "$GITHUB_SHA" --latest \
+            --title "쿠폰 매크로 0.1.${RUN_NO}" \
+            --notes "빌드 ${RUN_NO} · 커밋 ${GITHUB_SHA::7} · ${SUBJECT}"
+          # 최신 5개만 유지
+          gh release list --limit 100 --json tagName --jq '.[].tagName' | tail -n +6 \
+            | xargs -r -I{} gh release delete {} --cleanup-tag --yes

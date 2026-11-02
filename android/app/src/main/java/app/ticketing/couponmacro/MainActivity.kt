@@ -20,6 +20,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import java.io.File
 
 class MainActivity : Activity() {
 
@@ -49,6 +50,10 @@ class MainActivity : Activity() {
             },
         )
         root.addView(row(button("접근성 설정 열기") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }, button("앱 정보 열기") { openAppInfo() }))
+
+        root.addView(section("업데이트"))
+        root.addView(TextView(this).apply { text = "현재 버전 ${BuildConfig.VERSION_NAME} (빌드 ${BuildConfig.VERSION_CODE})" })
+        root.addView(button("업데이트 확인") { checkUpdate(silent = false) })
 
         root.addView(section("프리셋 (시작용 예시값)"))
         root.addView(
@@ -107,6 +112,7 @@ class MainActivity : Activity() {
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
+        checkUpdate(silent = true)
     }
 
     override fun onResume() {
@@ -142,6 +148,64 @@ class MainActivity : Activity() {
             if (job.launchApp) "시작됨 — 대상 앱을 실행합니다"
             else "시작됨 — 대상 앱의 쿠폰 화면으로 이동해 두세요",
         )
+    }
+
+    // ---- 업데이트 ----
+    /** silent: 앱 시작 시 자동 확인 — 새 버전이 있을 때만 알림창, 그 외엔 조용히. */
+    private fun checkUpdate(silent: Boolean) {
+        Thread({
+            try {
+                val rel = Updater.fetchLatest(BuildConfig.UPDATE_REPO)
+                runOnUiThread {
+                    when {
+                        rel == null -> if (!silent) toast("배포된 릴리스가 없습니다")
+                        Updater.isNewer(rel.code, BuildConfig.VERSION_CODE) -> promptUpdate(rel)
+                        else -> if (!silent) toast("최신 버전입니다 (빌드 ${BuildConfig.VERSION_CODE})")
+                    }
+                }
+            } catch (e: Exception) {
+                LogStore.add("업데이트 확인 실패: ${e.message}")
+                if (!silent) runOnUiThread { toast("업데이트 확인 실패: ${e.message}") }
+            }
+        }, "update-check").start()
+    }
+
+    private fun promptUpdate(rel: Updater.Release) {
+        AlertDialog.Builder(this)
+            .setTitle("새 버전 ${rel.tag}")
+            .setMessage(rel.notes.take(400).ifBlank { rel.name })
+            .setPositiveButton("업데이트") { _, _ -> downloadAndInstall(rel) }
+            .setNegativeButton("나중에", null)
+            .show()
+    }
+
+    private fun downloadAndInstall(rel: Updater.Release) {
+        if (MacroService.instance?.isRunning() == true) {
+            toast("작업 실행 중에는 업데이트할 수 없습니다")
+            return
+        }
+        if (!packageManager.canRequestPackageInstalls()) {
+            toast("'이 출처 허용'을 켠 뒤 다시 눌러주세요")
+            startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+            return
+        }
+        toast("다운로드 시작 (${rel.apkName})")
+        Thread({
+            try {
+                val apk = File(cacheDir, "update.apk")
+                Updater.download(rel, apk) { pct -> if (pct % 25 == 0) LogStore.add("업데이트 다운로드 $pct%") }
+                val info = packageManager.getPackageArchiveInfo(apk.path, 0)
+                if (info == null || info.packageName != packageName) {
+                    apk.delete()
+                    throw IllegalStateException("받은 파일이 이 앱의 APK 가 아님")
+                }
+                LogStore.add("업데이트 설치 요청: ${rel.tag}")
+                Updater.install(this, apk)
+            } catch (e: Exception) {
+                LogStore.add("업데이트 실패: ${e.message}")
+                runOnUiThread { toast("업데이트 실패: ${e.message}") }
+            }
+        }, "update-install").start()
     }
 
     private fun refreshStatus() {
