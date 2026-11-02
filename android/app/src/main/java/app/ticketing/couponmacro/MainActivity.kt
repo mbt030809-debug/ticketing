@@ -41,6 +41,8 @@ class MainActivity : Activity() {
     private lateinit var accStatus: TextView
     private lateinit var accBox: LinearLayout
     private lateinit var statusLine: TextView
+    private lateinit var startBtn: Button
+    private lateinit var testBtn: Button
     private lateinit var appLine: TextView
     private lateinit var timesBox: LinearLayout
     private lateinit var nextLine: TextView
@@ -143,43 +145,36 @@ class MainActivity : Activity() {
                     "· [쿠폰 목록 읽기] — 글자가 있는 쿠폰: 목록에서 받을 것만 체크\n" +
                     "· [위치로 찍기] — 글자 없는 이미지 쿠폰(카드 전체가 그림): 받을 카드를 직접 터치. 페이지를 스크롤하지 않은 첫 화면에서 보이는 카드만 지정하세요.\n" +
                     "직접 적을 땐 카드에 적힌 문구(예: 5,000원 할인)를 한 줄에 하나씩, 비슷한 쿠폰은 +로 이으세요 (예: 5,000원+3만원 이상). " +
-                    "[테스트하기 → 찾기만]을 하면 누를 위치에 초록 점이 뜹니다.",
+                    "[고급 설정 → 진단 도구 → 찾기만]을 하면 누를 위치에 초록 점이 뜹니다.",
             ),
         )
 
-        // 5) 시작
+        // 5) 시작: 버튼은 딱 두 개 — 예약 시작 / 즉시 실행(테스트)
         root.addView(section("5. 시작"))
-        root.addView(
-            Button(this).apply {
-                text = "▶ 시작"
-                textSize = 20f
-                setMinHeight(dp(64))
-                setOnClickListener { run(Mode.LIVE) }
-            },
-        )
-        root.addView(button("■ 중지") { MacroService.instance?.cancel() })
+        startBtn = Button(this).apply {
+            text = "▶ 예약 시작"
+            textSize = 20f
+            setMinHeight(dp(64))
+            setOnClickListener { onStartClicked() }
+        }
+        root.addView(startBtn)
+        testBtn = Button(this).apply {
+            text = "⚡ 즉시 실행 (테스트)"
+            textSize = 16f
+            setMinHeight(dp(52))
+            setOnClickListener { run(Mode.NOW) }
+        }
+        root.addView(testBtn)
         statusLine = TextView(this).apply { textSize = 14f; setPadding(0, dp(8), 0, 0) }
         root.addView(statusLine)
-        root.addView(note("회차 몇 분 전에 시작하세요. 화면은 켜 둔 채(잠금 해제)로 두면 됩니다."))
+        root.addView(
+            note(
+                "[예약 시작]: 켜진 다음 회차 시각에 맞춰 대기했다가 누릅니다 (실행 중에는 [중지]로 바뀜). " +
+                    "[즉시 실행]: 기다리지 않고 지금 바로 한 번 시도합니다 — 상시 받을 수 있는 쿠폰으로 연습하세요. 클릭이 나가면 빨간 점이 잠깐 뜹니다.",
+            ),
+        )
 
         // 접이식 메뉴
-        collapsible(root, "테스트하기") { b ->
-            b.addView(note("쿠폰 페이지에서 먼저 시험해 보세요. 상시 받을 수 있는 쿠폰으로 연습하면 좋습니다.\n클릭이 나가면 그 자리에 빨간 점이 잠깐 뜹니다. [찾기만]은 누를 위치에 초록 점만 표시합니다."))
-            b.addView(
-                row(
-                    button("찾기만\n(클릭 안 함)") { run(Mode.DRY) },
-                    button("지금 바로\n실행") { run(Mode.NOW) },
-                ),
-            )
-            b.addView(
-                button("5초 뒤 화면 요소 보기") {
-                    val svc = MacroService.instance
-                    if (svc == null) toast("접근성 서비스를 먼저 켜세요") else svc.dumpAfter(5000)
-                },
-            )
-            b.addView(note("→ 대상 앱의 쿠폰 화면으로 전환해 두면 5초 뒤 버튼 문구가 '로그'에 나옵니다."))
-        }
-
         collapsible(root, "고급 설정") { b ->
             b.addView(note("문구는 쉼표(,)로 구분, 부분 일치. 설정은 이벤트별로 자동 저장됩니다."))
             field(b, K_PKG, "대상 앱 패키지").onChanged { refreshAppLine() }
@@ -201,6 +196,16 @@ class MainActivity : Activity() {
             b.addView(refreshCb)
             dotsCb = CheckBox(this).apply { text = "클릭 위치를 빨간 점으로 표시 (찾기만: 초록 점)" }
             b.addView(dotsCb)
+            b.addView(section("진단 도구"))
+            b.addView(note("문제가 있을 때만 사용하세요. [찾기만]은 클릭하지 않고 누를 위치에 초록 점만 표시합니다."))
+            b.addView(button("찾기만 (클릭 안 함)") { run(Mode.DRY) })
+            b.addView(
+                button("5초 뒤 화면 요소 보기") {
+                    val svc = MacroService.instance
+                    if (svc == null) toast("접근성 서비스를 먼저 켜세요") else svc.dumpAfter(5000)
+                },
+            )
+            b.addView(note("→ 대상 앱의 쿠폰 화면으로 전환해 두면 5초 뒤 버튼 문구가 '로그'에 나옵니다."))
             b.addView(button("이 이벤트 설정 초기화") { resetProfile() })
         }
 
@@ -256,7 +261,13 @@ class MainActivity : Activity() {
             toast("쿠폰 ${Parse.coupons(c).size}개 ${if (append) "추가" else "저장"}됨")
         }
         refreshStatus()
-        LogStore.listener = { runOnUiThread { logView.text = LogStore.text(); refreshStatus() } }
+        LogStore.listener = {
+            runOnUiThread {
+                logView.text = LogStore.text()
+                refreshStatus()
+                logView.postDelayed({ refreshStatus() }, 1200) // 작업 스레드가 끝난 뒤 버튼 상태 정리
+            }
+        }
         logView.text = LogStore.text()
     }
 
@@ -300,6 +311,18 @@ class MainActivity : Activity() {
     }
 
     // ---- 동작 ----
+    /** 실행 중이면 [예약 시작] 버튼이 [중지] 역할 */
+    private fun onStartClicked() {
+        val svc = MacroService.instance
+        if (svc != null && svc.isRunning()) {
+            svc.cancel()
+            toast("중지했습니다")
+            refreshStatus()
+            return
+        }
+        run(Mode.LIVE)
+    }
+
     private fun run(mode: Mode) {
         val svc = MacroService.instance
         if (svc == null) {
@@ -324,6 +347,7 @@ class MainActivity : Activity() {
             return
         }
         svc.start(job, mode)
+        refreshStatus()
         val when_ = if (mode == Mode.LIVE) " · ${Schedule.describe(job.openAtMillis, System.currentTimeMillis())}에 맞춰 대기" else ""
         toast("시작됨$when_")
     }
@@ -333,6 +357,9 @@ class MainActivity : Activity() {
         val on = svc != null
         accStatus.text = if (on) "접근성: 켜짐" else "접근성: 꺼짐"
         accBox.visibility = if (on) View.GONE else View.VISIBLE
+        val running = svc?.isRunning() == true
+        startBtn.text = if (running) "■ 중지" else "▶ 예약 시작"
+        testBtn.isEnabled = !running
         statusLine.text = when {
             svc?.isRecording() == true -> "● 경로 기록 중 — 쿠폰 페이지까지 이동 후 [■ 기록 끝]"
             svc?.isRunning() == true -> "▶ 실행 중 · ${LogStore.last()}"
