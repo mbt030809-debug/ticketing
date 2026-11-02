@@ -8,6 +8,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.net.Uri
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.graphics.Path
@@ -290,7 +291,10 @@ class MacroService : AccessibilityService() {
                 LogStore.add(if (fresh) "쿠폰 고르기: 앱 실행(첫 화면에서 시작)" else "쿠폰 고르기: 앱을 앞으로 가져옴(현재 화면 유지)")
                 sleep(2000)
             }
-            for ((i, s) in job.steps.withIndex()) {
+            val before = targetRoot(job)?.let { pageSignature(it).hash }
+            val viaLink = job.eventUrl.isNotBlank() && openLink(job)
+            if (viaLink) waitPageChange(job, before, 4_000)
+            for ((i, s) in (if (viaLink) emptyList() else job.steps).withIndex()) {
                 val ok = runStep(job, s, 10_000)
                 LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.display()}' ${if (ok) "OK" else "못 찾음"}")
                 if (!ok && !s.optional) {
@@ -605,6 +609,46 @@ class MacroService : AccessibilityService() {
         }
     }
 
+    /** 이벤트 링크를 대상 앱에서 연다. 앱이 그 주소를 열 수 없으면 false(→ 기록한 경로로 대체) */
+    private fun openLink(job: Job): Boolean = try {
+        startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(job.eventUrl))
+                .setPackage(job.pkg)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+        LogStore.add("이벤트 링크 열기: ${job.eventUrl}")
+        true
+    } catch (e: Exception) {
+        LogStore.add("대상 앱이 이 링크를 열지 못합니다(${e.javaClass.simpleName}) — 기록한 경로로 대체합니다")
+        false
+    }
+
+    /** 링크로 연 페이지가 이전 화면과 달라질 때까지(= 새 페이지가 뜰 때까지) 최대 timeoutMs 대기 */
+    private fun waitPageChange(job: Job, before: Int?, timeoutMs: Long): Boolean {
+        val end = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < end) {
+            checkCancel()
+            val root = targetRoot(job)
+            if (root != null) {
+                val sig = pageSignature(root)
+                if (sig.hasContent && (before == null || sig.hash != before)) return true
+            }
+            Thread.sleep(80)
+        }
+        LogStore.add("새 페이지로 바뀐 것을 확인하지 못했지만 그대로 진행합니다")
+        return false
+    }
+
+    /** 쿠폰 페이지로 이동: 링크가 있으면 링크로 바로, 안 열리면(또는 링크가 없으면) 기록한 경로로 */
+    private fun goToEventPage(job: Job, plan: FlowPlan, before: Int?): Outcome? {
+        if (plan.useLink && openLink(job)) {
+            waitPageChange(job, before, 4_000)
+            return null
+        }
+        if (plan.replayRoute) return replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps)
+        return null
+    }
+
     /** 기록한 이동 경로를 순서대로 따라간다. 실패하면 오류 결과, 성공이면 null. waitLoaded: 단계마다 화면 로딩 완료까지 대기 */
     private fun replayRoute(job: Job, waitLoaded: Boolean): Outcome? {
         for ((i, s) in job.steps.withIndex()) {
@@ -671,9 +715,15 @@ class MacroService : AccessibilityService() {
             LogStore.add("앱 실행 생략 — 대상 앱의 시작 화면에 가 있어야 합니다")
         }
 
+        // 링크로 열 때: 정각 직전(1초 전)의 화면을 기억해 두었다가, 링크를 연 뒤 화면이 바뀌는 순간을 감지한다
+        var before: Int? = null
+        if (plan.useLink && fireAt - (System.currentTimeMillis() + offset) > 1_500) {
+            waitUntil(fireAt - 1_000, offset)
+            before = targetRoot(job)?.let { pageSignature(it).hash }
+        }
         waitUntil(fireAt, offset)
-        LogStore.add("정각 — 경로 이동 시작")
-        if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps)?.let { return it }
+        LogStore.add(if (plan.useLink) "정각 — 이벤트 링크로 이동" else "정각 — 경로 이동 시작")
+        goToEventPage(job, plan, before)?.let { return it }
         // 쿠폰 이미지/카드가 화면에 뜨는 즉시 선택한다 (별도 로딩 대기 없음: 클릭 루프가 대상이 보일 때까지 빠르게 확인)
         LogStore.add("경로 이동 끝 — 쿠폰 선택 시작")
         return clickLoop(job, Mode.LIVE)
@@ -741,7 +791,7 @@ class MacroService : AccessibilityService() {
             LogStore.add("테스트: 기록한 경로가 없어 지금 보이는 화면에서 시도합니다")
         }
 
-        if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps)?.let { return it }
+        goToEventPage(job, plan, targetRoot(job)?.let { pageSignature(it).hash })?.let { return it }
 
         if (plan.waitForOpen) {
             val fmt = SimpleDateFormat("MM-dd HH:mm:ss", Locale.KOREA)

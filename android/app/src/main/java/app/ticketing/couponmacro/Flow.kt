@@ -12,6 +12,8 @@ data class FlowPlan(
     /** 앱을 첫 화면에서 새로 시작할지(경로를 따라갈 때) / 아니면 보던 화면 유지 */
     val freshStart: Boolean,
     val replayRoute: Boolean,
+    /** 경로 대신(또는 먼저) 이벤트 링크로 페이지를 바로 연다. 링크가 안 열리면 기록한 경로로 대체 */
+    val useLink: Boolean,
     /** 경로 단계마다 화면 로딩 완료를 기다릴지 (정각 이동은 속도 우선이라 안 기다림) */
     val waitLoadedBetweenSteps: Boolean,
     /** 오픈 시각까지 기다릴지 (예약 실행만) */
@@ -32,8 +34,10 @@ object Flow {
         return FlowPlan(
             atOpen = atOpen,
             launch = if (live) job.launchApp else (hasRoute || !appInFront),
-            freshStart = hasRoute,
+            // 링크로 열 때는 앱을 첫 화면으로 초기화할 필요가 없다 (미리 켜 둔 앱 위에 페이지가 열린다)
+            freshStart = hasRoute && job.eventUrl.isBlank(),
             replayRoute = hasRoute,
+            useLink = job.eventUrl.isNotBlank(),
             waitLoadedBetweenSteps = !atOpen,
             waitForOpen = live,
             preRefresh = live && !atOpen && job.refreshOnMiss,

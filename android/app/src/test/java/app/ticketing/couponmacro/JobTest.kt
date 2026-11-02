@@ -77,6 +77,24 @@ class JobTest {
     }
 
     @Test
+    fun linksAreExtractedFromSharedTextAndValidated() {
+        // 앱의 [공유] 문구에는 설명이 섞여 있다 — 주소만 뽑는다
+        assertEquals("https://link.coupang.com/a/abc123", Links.extract("와우멤버스데이 특가 https://link.coupang.com/a/abc123 지금 확인하세요"))
+        assertEquals("https://example.com/event?id=1&x=2", Links.extract("  https://example.com/event?id=1&x=2.  "))
+        assertEquals("coupang://event/123", Links.extract("coupang://event/123"))
+        assertNull(Links.extract("링크 없음"))
+        assertNull(Links.extract("http://"))
+
+        val base = FormState(pkg = "a.b", targets = "x", coupons = "c")
+        assertEquals("", base.toJob(false).job!!.eventUrl)
+        assertEquals(
+            "https://link.coupang.com/a/abc123",
+            base.copy(eventUrl = "특가 https://link.coupang.com/a/abc123 !").toJob(false).job!!.eventUrl,
+        )
+        assertNotNull(base.copy(eventUrl = "그냥 글자").toJob(false).error)
+    }
+
+    @Test
     fun toJobRequiresPackageAndTarget() {
         assertNotNull(FormState(pkg = "", targets = "x").toJob(false).error)
         assertNotNull(FormState(pkg = "a.b", targets = "").toJob(false).error)

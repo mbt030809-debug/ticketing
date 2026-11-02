@@ -123,6 +123,14 @@ class MainActivity : Activity() {
 
         // 3) 쿠폰 페이지 가는 길
         root.addView(section("3. 쿠폰 페이지 가는 길"))
+        field(root, K_URL, "이벤트 페이지 링크 (권장) — 앱에서 해당 이벤트 [공유 → 링크 복사] 후 [붙여넣기]").onChanged { refreshRoute() }
+        root.addView(
+            row(
+                button("링크 붙여넣기") { pasteLink() },
+                button("링크 지우기") { fields.getValue(K_URL).setText(""); saveCurrent() },
+            ),
+        )
+        root.addView(note("링크가 있으면 경로 기록 없이 정각에 그 페이지로 바로 이동합니다(가장 빠르고 안정적). 링크가 안 열리면 아래 경로로 대체합니다."))
         routeLine = TextView(this).apply { setPadding(0, dp(4), 0, dp(4)) }
         root.addView(routeLine)
         root.addView(row(button("● 경로 기록") { startRecord() }, button("경로 지우기") { clearRoute() }))
@@ -472,9 +480,26 @@ class MainActivity : Activity() {
         saveCurrent()
     }
 
+    /** 클립보드의 공유 문구에서 주소만 뽑아 입력 */
+    private fun pasteLink() {
+        val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+        val text = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
+        val url = Links.extract(text)
+        if (url == null) {
+            toast("클립보드에 링크가 없습니다. 앱에서 [공유 → 링크 복사]를 먼저 하세요")
+        } else {
+            fields.getValue(K_URL).setText(url)
+            saveCurrent()
+            toast("링크를 입력했습니다")
+        }
+    }
+
     private fun refreshRoute() {
         val steps = Parse.steps(f(K_STEPS))
-        routeLine.text = if (steps.isEmpty()) {
+        val link = Links.extract(f(K_URL))
+        routeLine.text = if (link != null) {
+            "링크로 이동: ${link.take(60)}" + if (steps.isEmpty()) "" else " (링크가 안 열리면 경로 ${steps.size}단계로 대체)"
+        } else if (steps.isEmpty()) {
             "경로 없음 — 시작하면 앱만 열립니다. 직접 쿠폰 페이지로 이동해 두거나 아래에서 기록하세요."
         } else {
             "경로 ${steps.size}단계: " + steps.joinToString(" → ") { (if (it.optional) "(" else "") + (if (it.isTap) "아이콘 탭" else it.text) + (if (it.optional) ")" else "") }
@@ -697,7 +722,7 @@ class MainActivity : Activity() {
         name = profile.label, pkg = f(K_PKG).trim(), launchApp = launchCb.isChecked,
         openAt = "", leadMs = f(K_LEAD), intervalMs = f(K_INTERVAL),
         maxAttempts = f(K_ATTEMPTS), resultWaitSec = f(K_WAIT),
-        steps = f(K_STEPS), popups = f(K_POPUPS), targets = f(K_TARGETS), coupons = f(K_COUPONS),
+        eventUrl = f(K_URL), steps = f(K_STEPS), popups = f(K_POPUPS), targets = f(K_TARGETS), coupons = f(K_COUPONS),
         success = f(K_SUCCESS), already = f(K_ALREADY), soldout = f(K_SOLDOUT),
         refreshOnMiss = refreshCb.isChecked,
         slots = slotsText, slotsOff = slotsOff,
@@ -715,6 +740,7 @@ class MainActivity : Activity() {
         fields.getValue(K_INTERVAL).setText(s.intervalMs)
         fields.getValue(K_ATTEMPTS).setText(s.maxAttempts)
         fields.getValue(K_WAIT).setText(s.resultWaitSec)
+        fields.getValue(K_URL).setText(s.eventUrl)
         fields.getValue(K_STEPS).setText(s.steps)
         fields.getValue(K_POPUPS).setText(s.popups)
         fields.getValue(K_TARGETS).setText(s.targets)
@@ -816,6 +842,7 @@ class MainActivity : Activity() {
         private const val K_ATTEMPTS = "maxAttempts"
         private const val K_WAIT = "resultWaitSec"
         private const val K_STEPS = "steps"
+        private const val K_URL = "eventUrl"
         private const val K_POPUPS = "popups"
         private const val K_TARGETS = "targets"
         private const val K_COUPONS = "coupons"

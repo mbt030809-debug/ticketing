@@ -84,6 +84,24 @@ class FlowTest {
     }
 
     @Test
+    fun eventLinkReplacesTheRouteButKeepsItAsFallback() {
+        val withLink = FormState(
+            pkg = "a.b", targets = "x", coupons = "c", steps = route, eventUrl = "https://link.coupang.com/a/abc",
+            openAt = "2026-11-05 10:00:00",
+        ).toJob(requireOpenAt = true).job!!
+        for (mode in listOf(Mode.LIVE, Mode.NOW, Mode.DRY)) {
+            val p = Flow.plan(withLink, mode, appInFront = true)
+            assertTrue("$mode: 링크 사용", p.useLink)
+            assertTrue("$mode: 링크가 안 열리면 쓰도록 경로는 유지", p.replayRoute)
+            assertFalse("$mode: 링크로 열 땐 앱을 첫 화면으로 초기화하지 않음", p.freshStart)
+        }
+        // 링크가 없으면 기존처럼 경로
+        val noLink = Flow.plan(job(route), Mode.LIVE, appInFront = false)
+        assertFalse(noLink.useLink)
+        assertTrue(noLink.freshStart)
+    }
+
+    @Test
     fun autoLaunchOffStillReplaysRoute() {
         val p = Flow.plan(job(route, launchApp = false), Mode.LIVE, appInFront = true)
         assertFalse(p.launch)

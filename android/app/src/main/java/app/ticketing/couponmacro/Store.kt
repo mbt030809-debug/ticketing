@@ -36,6 +36,7 @@ object Store {
             .putString("slots", f.slots)
             .putString("slotsOff", f.slotsOff)
             .putBoolean("autoRun", f.autoRun)
+            .putString("eventUrl", f.eventUrl)
             .putBoolean("routeAtOpen", f.routeAtOpen)
             .putString("launchLeadSec", f.launchLeadSec)
             .putString("warnSec", f.warnSec)
@@ -138,6 +139,7 @@ object Store {
             slots = slots,
             slotsOff = slotsOff,
             autoRun = p.getBoolean("autoRun", d.autoRun),
+            eventUrl = p.getString("eventUrl", d.eventUrl).orEmpty(),
             routeAtOpen = p.getBoolean("routeAtOpen", d.routeAtOpen),
             launchLeadSec = p.getString("launchLeadSec", d.launchLeadSec).orEmpty().ifBlank { d.launchLeadSec },
             warnSec = p.getString("warnSec", d.warnSec).orEmpty().ifBlank { d.warnSec },
