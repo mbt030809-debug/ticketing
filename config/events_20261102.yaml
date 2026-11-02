@@ -1,0 +1,42 @@
+# 이벤트 설정 샘플 (2026-11-02 작성)
+# ※ 아래 값은 전부 예시/placeholder. 실기기에서 `python -m ticketing inspect --clickable` 로
+#    실제 화면의 text / content-desc / resource-id 를 확인해서 채울 것.
+#
+# selector 키: text, textContains, textMatches, description, descriptionContains, resourceId, className
+
+events:
+  coupang_wowday:                       # 쿠팡 와우 멤버 데이
+    package: com.coupang.mobile         # 확인: python -m ticketing packages coupang
+    open_at: "2026-11-05 10:00:00"      # TODO: 실제 오픈 시각 (KST)
+    lead_ms: 120                        # 탭 지연 보정 — 리허설로 조정
+    interval_ms: 150
+    max_attempts: 60
+    refresh_on_miss: true               # 오픈 전 비활성 화면이면 오픈 후 새로고침
+    popups:                             # 광고/업데이트 팝업 닫기 (TODO)
+      - { text: "닫기" }
+      - { text: "나중에" }
+    pre_steps:                          # 쿠폰 페이지까지 이동 (TODO: 실제 경로로 교체)
+      - { wait: { resourceId: "com.coupang.mobile:id/home_tab" }, timeout: 20 }
+      - { click: { textContains: "와우" }, timeout: 10 }
+    target: { textContains: "쿠폰 받기" }          # TODO
+    post_click:
+      - { text: "확인" }
+    success_texts: ["발급되었습니다", "받기 완료"]   # TODO
+    already_texts: ["이미 받은"]
+    soldout_texts: ["모두 소진", "마감"]
+
+  naver_plus_nepdasale:                 # 네이버 N+ 스토어 (녭다세일)
+    package: ""                         # TODO: python -m ticketing packages naver 로 N+ 앱 패키지 확인
+    open_at: "2026-11-05 10:00:00"      # TODO
+    lead_ms: 120
+    interval_ms: 150
+    max_attempts: 60
+    refresh_on_miss: true
+    popups:
+      - { text: "닫기" }
+    pre_steps:
+      - { click: { textContains: "혜택" }, timeout: 15 }     # TODO
+    target: { textContains: "쿠폰 받기" }                      # TODO
+    success_texts: ["발급", "받기 완료"]
+    already_texts: ["이미 받은"]
+    soldout_texts: ["소진", "마감"]
