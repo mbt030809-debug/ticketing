@@ -194,6 +194,17 @@ class MainActivity : Activity() {
         collapsible(root, "업데이트") { b ->
             b.addView(note("현재 버전 ${BuildConfig.VERSION_NAME} (빌드 ${BuildConfig.VERSION_CODE}). 앱을 켤 때 새 버전이 있으면 자동으로 알려줍니다."))
             b.addView(button("업데이트 확인") { checkUpdate(silent = false) })
+            b.addView(
+                note(
+                    "업데이트가 안 되면(서명이 다르다는 오류 등): 이 앱을 삭제한 뒤 아래 [릴리스 페이지 열기]에서 최신 APK를 받아 새로 설치하세요. " +
+                        "한 번만 하면 이후부터는 앱 안에서 업데이트됩니다. (삭제하면 저장된 설정이 지워집니다)",
+                ),
+            )
+            b.addView(
+                button("릴리스 페이지 열기 (APK 직접 받기)") {
+                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/${BuildConfig.UPDATE_REPO}/releases/latest")))
+                },
+            )
         }
 
         selectProfile(Presets.byId(Store.lastProfileId(this)), persist = false)
@@ -510,7 +521,7 @@ class MainActivity : Activity() {
                 val rel = Updater.fetchLatest(BuildConfig.UPDATE_REPO)
                 runOnUiThread {
                     when {
-                        rel == null -> if (!silent) toast("배포된 릴리스가 없습니다")
+                        rel == null -> if (!silent) toast("배포된 새 버전이 아직 없습니다")
                         Updater.isNewer(rel.code, BuildConfig.VERSION_CODE) -> promptUpdate(rel)
                         else -> if (!silent) toast("최신 버전입니다 (빌드 ${BuildConfig.VERSION_CODE})")
                     }

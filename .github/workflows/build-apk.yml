@@ -8,7 +8,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # 릴리스 생성용
+  contents: write   # 릴리스/서명 키 보관(비공개 초안 릴리스) 용
+
+# 서명 키를 만들고 보관하는 단계가 겹치지 않도록 실행을 한 줄로 세운다
+concurrency:
+  group: build-apk
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -23,27 +28,51 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # 서명 키는 저장소에 두지 않고 GitHub Secrets 로만 주입한다.
+      # 앱 업데이트(덮어 설치)는 매번 같은 서명 키로 서명된 APK 끼리만 가능하다.
+      # 1) Secrets(ANDROID_KEYSTORE_BASE64/PASSWORD)가 있으면 그것을 쓰고,
+      # 2) 없으면 '비공개 초안 릴리스'(저장소 쓰기 권한자만 볼 수 있음)에 보관된 키를 쓰며,
+      # 3) 그것도 없으면 처음 한 번 생성해 거기에 보관한다.
       - name: Prepare signing key
-        id: sign
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           KS_PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
-          if [ -n "$KS_B64" ] && [ -n "$KS_PW" ]; then
-            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
-            echo "path=$RUNNER_TEMP/release.keystore" >> "$GITHUB_OUTPUT"
-            echo "signed=true" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          KS="$RUNNER_TEMP/release.keystore"
+          if [ -n "${KS_B64:-}" ] && [ -n "${KS_PW:-}" ]; then
+            echo "서명 키: GitHub Secrets 사용"
+            echo "$KS_B64" | base64 -d > "$KS"
+            PW="$KS_PW"
           else
-            echo "signed=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::서명 키 시크릿(ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD) 없음 -> 디버그 키 서명(업데이트 불가). 릴리스 생략."
+            # 키 파일의 비밀은 '비공개 초안 릴리스' 접근 권한으로 지킨다 (파일 비밀번호는 고정값)
+            PW="couponmacro-signing-key"
+            ID=$(gh api "repos/$REPO/releases" --paginate \
+                  --jq '.[] | select(.draft and .name=="signing-key (private)") | .id' | head -n1 || true)
+            if [ -n "$ID" ]; then
+              AID=$(gh api "repos/$REPO/releases/$ID/assets" \
+                    --jq '.[] | select(.name=="release.keystore") | .id' | head -n1)
+              gh api -H "Accept: application/octet-stream" "repos/$REPO/releases/assets/$AID" > "$KS"
+              echo "서명 키: 비공개 초안 릴리스에서 복원 (release id $ID)"
+            else
+              keytool -genkeypair -keystore "$KS" -storetype pkcs12 -alias couponmacro \
+                -keyalg RSA -keysize 2048 -validity 36500 \
+                -storepass "$PW" -keypass "$PW" -dname "CN=couponmacro, O=personal, C=KR"
+              gh release create signing-key-v1 "$KS" --draft \
+                --title "signing-key (private)" \
+                --notes "앱 서명 키 보관용 비공개 초안입니다. 삭제하거나 게시(Publish)하지 마세요. 삭제하면 이후 앱 업데이트가 불가능해집니다." \
+                --target "$GITHUB_SHA"
+              echo "서명 키: 새로 생성해 비공개 초안 릴리스에 보관"
+            fi
           fi
+          # 복원/생성된 키가 유효한지 즉시 확인 (아니면 여기서 실패)
+          keytool -list -keystore "$KS" -storepass "$PW" -alias couponmacro > /dev/null
+          echo "ANDROID_KEYSTORE_PATH=$KS" >> "$GITHUB_ENV"
+          echo "ANDROID_KEYSTORE_PASSWORD=$PW" >> "$GITHUB_ENV"
 
       - name: Unit tests + release APK
         working-directory: android
-        env:
-          ANDROID_KEYSTORE_PATH: ${{ steps.sign.outputs.path }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: ./gradlew --no-daemon testDebugUnitTest assembleRelease -PappVersionCode=${{ github.run_number }}
 
       - name: Name APK with build date (KST)
@@ -54,6 +83,7 @@ jobs:
           cp android/app/build/outputs/apk/release/app-release.apk "out/couponmacro_${D}.apk"
           echo "date=${D}" >> "$GITHUB_OUTPUT"
           APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          # 서명 인증서 지문: 빌드마다 같아야 업데이트가 된다
           "$APKSIGNER" verify --print-certs "out/couponmacro_${D}.apk" | grep -i "SHA-256" || true
 
       - uses: actions/upload-artifact@v4
@@ -62,9 +92,8 @@ jobs:
           path: out/*.apk
           if-no-files-found: error
 
-      # 앱 내 업데이트가 읽는 최신 릴리스. 올바른 키로 서명된 빌드만 게시한다.
+      # 앱 내 업데이트가 읽는 최신 릴리스(공개). 서명 키 보관용 초안은 건드리지 않는다.
       - name: Publish release
-        if: steps.sign.outputs.signed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_NO: ${{ github.run_number }}
@@ -74,6 +103,6 @@ jobs:
             --target "$GITHUB_SHA" --latest \
             --title "쿠폰 매크로 0.1.${RUN_NO}" \
             --notes "빌드 ${RUN_NO} · 커밋 ${GITHUB_SHA::7} · ${SUBJECT}"
-          # 최신 5개만 유지
-          gh release list --limit 100 --json tagName --jq '.[].tagName' | tail -n +6 \
-            | xargs -r -I{} gh release delete {} --cleanup-tag --yes
+          # 공개 릴리스는 최신 5개만 유지 (초안=서명 키 보관본은 제외)
+          gh release list --limit 100 --json tagName,isDraft --jq '.[] | select(.isDraft | not) | .tagName' \
+            | tail -n +6 | xargs -r -I{} gh release delete {} --cleanup-tag --yes
