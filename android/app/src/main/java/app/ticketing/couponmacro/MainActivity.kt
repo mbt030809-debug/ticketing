@@ -131,7 +131,9 @@ class MainActivity : Activity() {
                 "[경로 기록]을 누르면 대상 앱이 열립니다. 쿠폰 페이지까지 평소처럼 눌러서 이동한 뒤, " +
                     "화면 위에 뜨는 [■ 기록 끝]을 누르세요. (쿠폰 받기 버튼은 누르지 마세요) " +
                     "기록 중에는 터치를 이 앱이 먼저 받아 기록한 뒤 같은 동작을 앱에 그대로 전달합니다(약간 늦게 반응할 수 있음). " +
-                    "눌렀던 위치·스와이프(스크롤)·누른 간격이 저장되고(파란 점), 시작하면 같은 동작을 같은 순서·간격으로 합니다. " +
+                    "눌렀던 위치·스와이프(스크롤)·누른 간격과 '누르기 직전 화면'이 저장되고(파란 점), 시작하면 같은 동작을 같은 순서로 하되 " +
+                    "각 단계는 지금 화면이 기록 때 화면(◎)과 같아 보일 때 누릅니다 — 로딩 뒤 스크롤되는 화면도 스크롤이 끝난 뒤에 누릅니다(안드로이드 11 이상). " +
+                    "버튼을 누른 뒤 화면이 다 바뀌기를 기다렸다가 다음 곳을 누르세요. " +
                     "화면 아래의 뒤로가기/홈 버튼 조작은 기록되지 않으니 앱 안의 버튼으로 이동하세요. 앱 화면 구성이 달라지면 다시 기록하세요.",
             ),
         )
@@ -258,7 +260,8 @@ class MainActivity : Activity() {
         Store.takePendingSteps(this, profile.id)?.let { steps ->
             fields.getValue(K_STEPS).setText(steps)
             saveCurrent()
-            toast("경로 ${Parse.steps(steps).size}단계 저장됨")
+            val st = Parse.steps(steps)
+            toast("경로 ${st.size}단계 저장됨 (기준 화면 ${st.count { it.ref != null }}개)")
         }
         Store.takePendingCoupons(this, profile.id)?.let { (c, append) ->
             val merged = if (append) (Parse.coupons(f(K_COUPONS)) + Parse.coupons(c)).distinct().joinToString("\n") else c

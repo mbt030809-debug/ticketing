@@ -16,6 +16,8 @@ enum class Mode { LIVE, NOW, DRY }
  *  - 스와이프:   "S@0.50,0.70>0.50,0.30#350~900"   시작→끝 위치, #뒤는 걸린 시간(ms) — 스크롤도 기록된다
  *  - 글자 단계:  "혜택" / "혜택@0.20,0.35"         직접 적을 때(같은 글자가 여러 곳이면 힌트에 가장 가까운 것)
  *  - 앞에 ? 를 붙이면 없어도 진행(optional) — 팝업 닫기처럼 매번 뜨지 않는 것
+ *  - 줄 끝 "^기준화면" : 이 단계를 누르기 직전 화면(ScreenRef). 재생 때 그 화면이 뜰 때까지 기다린다.
+ *    마지막 단계는 "^기준화면^끝화면"(기준화면이 없으면 "^^끝화면") — 끝화면은 기록을 끝낸 순간의 화면
  */
 data class Step(
     val text: String,
@@ -26,6 +28,10 @@ data class Step(
     val endX: Float? = null,
     val endY: Float? = null,
     val durMs: Long? = null,
+    /** 이 단계를 누르기 직전 화면(기록 때) — ScreenRef 격자. 재생 때 이 화면이 뜰 때까지 기다린 뒤 누른다 */
+    val ref: String? = null,
+    /** (마지막 단계만) 기록을 끝낸 순간의 화면 — 쿠폰 선택 전에 이 화면이 뜰 때까지 기다린다 */
+    val endRef: String? = null,
 ) {
     /** 스와이프 단계 */
     val isSwipe: Boolean get() = hintX != null && hintY != null && endX != null && endY != null
@@ -38,7 +44,7 @@ data class Step(
         isSwipe -> "(스와이프 ${pct(hintX)},${pct(hintY)}→${pct(endX)},${pct(endY)})"
         isTap -> "(탭 ${pct(hintX)},${pct(hintY)})"
         else -> text
-    }
+    } + (if (ref != null) "◎" else "")
 
     private fun pct(v: Float?) = "${((v ?: 0f) * 100).toInt()}%"
 }
@@ -52,15 +58,19 @@ object RouteSteps {
      * popupLabel: 눌린 곳이 팝업 닫기 류("닫기" 등)면 그 글자(없어도 진행하는 '?글자' 단계로 저장), 아니면 null.
      * 글자는 저장하지 않는다(위치만).
      */
-    fun line(g: RecordedGesture, widthPx: Int, heightPx: Int, gapMs: Long?, popupLabel: String?): String {
+    fun line(
+        g: RecordedGesture, widthPx: Int, heightPx: Int, gapMs: Long?, popupLabel: String?,
+        ref: String? = null, endRef: String? = null,
+    ): String {
+        val refs = if (ref == null && endRef == null) "" else "^${ref.orEmpty()}" + (if (endRef != null) "^$endRef" else "")
         val gap = if (gapMs != null) "~${gapMs.coerceAtLeast(0)}" else ""
         return when (g.kind) {
             GestureKind.SWIPE ->
-                "S@${frac(g.x1, widthPx)},${frac(g.y1, heightPx)}>${frac(g.x2, widthPx)},${frac(g.y2, heightPx)}#${g.durMs}$gap"
+                "S@${frac(g.x1, widthPx)},${frac(g.y1, heightPx)}>${frac(g.x2, widthPx)},${frac(g.y2, heightPx)}#${g.durMs}$gap$refs"
             GestureKind.TAP -> {
                 val text = popupLabel?.replace('@', ' ')?.replace('~', ' ')?.replace('#', ' ')?.trim().orEmpty()
                 val hold = if (g.durMs >= Gestures.LONG_PRESS_MS) "#${g.durMs}" else ""
-                (if (text.isNotEmpty()) "?$text" else "") + "@${frac(g.x1, widthPx)},${frac(g.y1, heightPx)}$hold$gap"
+                (if (text.isNotEmpty()) "?$text" else "") + "@${frac(g.x1, widthPx)},${frac(g.y1, heightPx)}$hold$gap$refs"
             }
         }
     }
@@ -110,8 +120,9 @@ object Parse {
         s.split('\n', ';').map { it.trim() }.filter { it.isNotEmpty() }
 
     private const val NUM = "([0-9]*\\.?[0-9]+)"
-    private val STEP_SWIPE = Regex("^S@" + NUM + "\\s*,\\s*" + NUM + ">" + NUM + "\\s*,\\s*" + NUM + "(?:#([0-9]+))?(?:~([0-9]+))?$")
-    private val STEP_POS = Regex("^(.*?)@" + NUM + "\\s*,\\s*" + NUM + "(?:#([0-9]+))?(?:~([0-9]+))?$")
+    private const val REFS = "(?:\\^([A-Za-z0-9_-]*)(?:\\^([A-Za-z0-9_-]+))?)?"
+    private val STEP_SWIPE = Regex("^S@" + NUM + "\\s*,\\s*" + NUM + ">" + NUM + "\\s*,\\s*" + NUM + "(?:#([0-9]+))?(?:~([0-9]+))?" + REFS + "$")
+    private val STEP_POS = Regex("^(.*?)@" + NUM + "\\s*,\\s*" + NUM + "(?:#([0-9]+))?(?:~([0-9]+))?" + REFS + "$")
 
     /** 한 줄에 하나(Step 설명 참고). 앞에 ? 를 붙이면 optional(못 찾아도 계속). */
     fun steps(s: String): List<Step> =
@@ -123,12 +134,18 @@ object Parse {
             if (sw != null) {
                 val v = (1..4).map { sw.groupValues[it].toFloatOrNull() }
                 if (v.any { it == null }) null
-                else Step("", optional, v[0], v[1], sw.groupValues[6].toLongOrNull(), v[2], v[3], sw.groupValues[5].toLongOrNull())
+                else Step(
+                    "", optional, v[0], v[1], sw.groupValues[6].toLongOrNull(), v[2], v[3], sw.groupValues[5].toLongOrNull(),
+                    sw.groupValues[7].ifEmpty { null }, sw.groupValues[8].ifEmpty { null },
+                )
             } else if (m != null) {
                 val fx = m.groupValues[2].toFloatOrNull()
                 val fy = m.groupValues[3].toFloatOrNull()
                 if (fx != null && fy != null) {
-                    Step(m.groupValues[1].trim(), optional, fx, fy, m.groupValues[5].toLongOrNull(), null, null, m.groupValues[4].toLongOrNull())
+                    Step(
+                        m.groupValues[1].trim(), optional, fx, fy, m.groupValues[5].toLongOrNull(), null, null, m.groupValues[4].toLongOrNull(),
+                        m.groupValues[6].ifEmpty { null }, m.groupValues[7].ifEmpty { null },
+                    )
                 } else {
                     null
                 }

@@ -5,6 +5,7 @@
     android:accessibilityFlags="flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
     android:canPerformGestures="true"
     android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
     android:description="@string/service_desc"
     android:notificationTimeout="50"
     android:settingsActivity="app.ticketing.couponmacro.MainActivity" />

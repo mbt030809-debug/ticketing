@@ -108,6 +108,48 @@ class JobTest {
     }
 
     @Test
+    fun stepsCarryTheRecordedScreenReferences() {
+        // 줄 끝 ^기준화면(탭 직전 화면), 마지막 단계는 ^기준화면^끝화면, 기준화면이 없으면 ^^끝화면
+        val steps = Parse.steps(
+            "@0.2000,0.3500~1200^AAAA\nS@0.5,0.7>0.5,0.3#350~900^BBBB\n?닫기@0.5,0.8^CCCC\n@0.5000,0.9000#800~100^DDDD^EEEE\n@0.1,0.1^^FFFF",
+        )
+        assertEquals(
+            listOf(
+                Step("", false, 0.2f, 0.35f, 1200, ref = "AAAA"),
+                Step("", false, 0.5f, 0.7f, 900, 0.5f, 0.3f, 350, "BBBB"),
+                Step("닫기", true, 0.5f, 0.8f, null, ref = "CCCC"),
+                Step("", false, 0.5f, 0.9f, 100, null, null, 800, "DDDD", "EEEE"),
+                Step("", false, 0.1f, 0.1f, null, endRef = "FFFF"),
+            ),
+            steps,
+        )
+        assertEquals("(탭 20%,35%)◎", steps[0].display())
+        assertEquals("?닫기◎", steps[2].display())
+        assertNull(Parse.steps("@0.1,0.1")[0].ref)
+    }
+
+    @Test
+    fun routeRecordingStoresScreenReferencesAndReadsThemBack() {
+        val tap = RecordedGesture(GestureKind.TAP, 200f, 700f, 200f, 700f, Gestures.TAP_MS)
+        val swipe = RecordedGesture(GestureKind.SWIPE, 500f, 1400f, 500f, 600f, 350)
+        assertEquals("@0.2000,0.3500~1200^AAAA", RouteSteps.line(tap, 1000, 2000, 1200, null, "AAAA"))
+        assertEquals("@0.2000,0.3500^AAAA^ZZZZ", RouteSteps.line(tap, 1000, 2000, null, null, "AAAA", "ZZZZ"))
+        assertEquals("@0.2000,0.3500^^ZZZZ", RouteSteps.line(tap, 1000, 2000, null, null, null, "ZZZZ"))
+        assertEquals("S@0.5000,0.7000>0.5000,0.3000#350~900^BBBB", RouteSteps.line(swipe, 1000, 2000, 900, null, "BBBB"))
+        // 기준 화면이 없으면 예전과 같은 줄
+        assertEquals("@0.2000,0.3500~1200", RouteSteps.line(tap, 1000, 2000, 1200, null))
+        val lines = listOf(
+            RouteSteps.line(tap, 1000, 2000, 900, null, "AAAA"),
+            RouteSteps.line(swipe, 1000, 2000, 1500, null, "BBBB", "ZZZZ"),
+        )
+        val back = Parse.steps(lines.joinToString("\n"))
+        assertEquals("AAAA", back[0].ref)
+        assertEquals("BBBB", back[1].ref)
+        assertEquals("ZZZZ", back[1].endRef)
+        assertTrue(back[1].isSwipe)
+    }
+
+    @Test
     fun toJobRequiresPackageAndTarget() {
         assertNotNull(FormState(pkg = "", targets = "x").toJob(false).error)
         assertNotNull(FormState(pkg = "a.b", targets = "").toJob(false).error)

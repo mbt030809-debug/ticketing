@@ -6,8 +6,10 @@ import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.graphics.Path
@@ -18,10 +20,12 @@ import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.view.Display
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -127,7 +131,17 @@ class MacroService : AccessibilityService() {
     // ---- 경로 기록: 사용자가 직접 눌러 이동하는 순서를 '이동 단계'로 저장 ----
     @Volatile private var recordPkg: String? = null
     private var recordProfile = ""
-    private val recorded = ArrayList<String>()
+    private class Rec(val g: RecordedGesture, val gapMs: Long, val popup: String?, val ref: String?)
+
+    /** 탭 직전 화면 캡처를 비동기로 받아 두는 곳 */
+    private class RefShot {
+        val latch = CountDownLatch(1)
+        @Volatile var grid: IntArray? = null
+    }
+
+    private val recorded = ArrayList<Rec>()
+    @Volatile private var stopping = false
+    private var curShot: RefShot? = null
     private var recordOverlay: View? = null
     private var recordButton: Button? = null
     private var lastRecordAt = 0L
@@ -135,6 +149,8 @@ class MacroService : AccessibilityService() {
     private var proxyLp: WindowManager.LayoutParams? = null
     private val proxyPoints = ArrayList<TouchPoint>()
     private val recordExecutor = Executors.newSingleThreadExecutor() // 기록한 동작을 순서대로 처리
+    private val refExecutor = Executors.newSingleThreadExecutor()    // 탭 직전 화면 캡처(기록)
+    private val shotCbExecutor = Executors.newSingleThreadExecutor() // 시스템 캡처 콜백 전용
 
     fun isRecording(): Boolean = recordPkg != null
 
@@ -142,6 +158,7 @@ class MacroService : AccessibilityService() {
     fun startRecording(pkg: String, profileId: String): Boolean {
         if (isRunning() || isRecording()) return false
         synchronized(recorded) { recorded.clear() }
+        stopping = false
         recordProfile = profileId
         if (!launch(pkg)) return false
         lastRecordAt = SystemClock.elapsedRealtime()
@@ -151,17 +168,40 @@ class MacroService : AccessibilityService() {
         return true
     }
 
+    /** [■ 기록 끝]: 마지막 동작까지 처리한 뒤(순서대로) 끝 화면을 저장하고 기록을 마친다 */
     fun stopRecording() {
-        if (recordPkg == null) return
+        if (recordPkg == null || stopping) return
+        stopping = true
+        main.post {
+            recordButton?.text = "저장 중…"
+            recordButton?.isEnabled = false
+        }
+        recordExecutor.execute { finishRecording() }
+    }
+
+    private fun finishRecording() {
+        // 기록을 끝낸 순간의 화면(= 쿠폰을 고를 화면)도 기준으로 저장: 재생 때 이 화면이 뜬 뒤에 쿠폰을 고른다
+        val end = captureGrid()?.takeIf { ScreenRef.informative(it) }?.let { ScreenRef.encode(it) }
         recordPkg = null
         hideRecordOverlay()
-        val steps = synchronized(recorded) { recorded.toList() }
-        val lines = steps // 한 줄 = 눌렀던 위치(+간격). 팝업 닫기 류는 기록 때 이미 '?글자' 로 저장됨
+        val dm = resources.displayMetrics
+        val recs = synchronized(recorded) { recorded.toList() }
+        val lines = recs.mapIndexed { i, r ->
+            // 한 줄 = 눌렀던 위치(+간격 +직전 화면). 팝업 닫기 류는 기록 때 이미 '?글자' 로 저장됨
+            RouteSteps.line(r.g, dm.widthPixels, dm.heightPixels, r.gapMs, r.popup, r.ref, if (i == recs.lastIndex) end else null)
+        }
         if (lines.isNotEmpty()) Store.setPendingSteps(this, recordProfile, lines.joinToString("\n"))
-        LogStore.add("경로 기록 끝: ${lines.size}단계")
+        val refs = recs.count { it.ref != null }
+        LogStore.add("경로 기록 끝: ${lines.size}단계 · 기준 화면 ${refs}/${lines.size}" + if (end != null) " + 끝 화면" else "")
+        if (lines.isNotEmpty() && (refs < lines.size || end == null)) {
+            LogStore.add(
+                if (Build.VERSION.SDK_INT < 30) "기준 화면은 안드로이드 11 이상에서만 저장됩니다 — 이 기기에서는 시간 기준으로 진행합니다"
+                else "일부 화면은 기준으로 저장하지 못했습니다(캡처 실패 코드 $lastShotFail / 한 색 화면 / 보안 화면) — 그 단계는 시간 기준으로 진행합니다",
+            )
+        }
         notifyResult(
             "경로 기록 완료",
-            if (lines.isEmpty()) "기록된 단계가 없습니다 (화면을 한 번도 누르지 않음)" else "${lines.size}단계 저장됨 — 탭해서 앱 열기",
+            if (lines.isEmpty()) "기록된 단계가 없습니다 (화면을 한 번도 누르지 않음)" else "${lines.size}단계 저장됨 (기준 화면 ${refs}개) — 탭해서 앱 열기",
         )
         try {
             startActivity(
@@ -177,7 +217,7 @@ class MacroService : AccessibilityService() {
      * 사용자의 터치 한 동작(탭/스와이프)을 기록하고, 같은 동작을 아래 앱에 대신 전달한다.
      * (기록 중에는 화면 전체를 이 앱의 투명 창이 먼저 받는다 — 어떤 화면이든(웹/직접 그린 화면 포함) 터치 위치로 기록된다)
      */
-    private fun onRecordedGesture(g: RecordedGesture) {
+    private fun onRecordedGesture(g: RecordedGesture, shot: RefShot?) {
         if (recordPkg == null) return
         val dm = resources.displayMetrics
         val now = SystemClock.elapsedRealtime()
@@ -185,9 +225,11 @@ class MacroService : AccessibilityService() {
         lastRecordAt = now
         // 팝업 닫기 류인지: 탭이 팝업을 닫아 버리기 전에 확인
         val popup = if (g.kind == GestureKind.TAP) popupLabelAt(g.x1, g.y1) else null
-        val line = RouteSteps.line(g, dm.widthPixels, dm.heightPixels, gap, popup)
+        // 탭 직전 화면(누르기 시작할 때 캡처해 둔 것) — 재생 때 '원하는 화면이 뜰 때까지' 기다리는 기준
+        val grid = if (shot != null && shot.latch.await(3, TimeUnit.SECONDS)) shot.grid else null
+        val ref = grid?.takeIf { ScreenRef.informative(it) }?.let { ScreenRef.encode(it) }
         val n = synchronized(recorded) {
-            recorded += line
+            recorded += Rec(g, gap, popup, ref)
             recorded.size
         }
         showDot(g.x1, g.y1, Color.BLUE)
@@ -196,7 +238,10 @@ class MacroService : AccessibilityService() {
         } else {
             "탭 ${(g.x1 * 100 / dm.widthPixels).toInt()}%,${(g.y1 * 100 / dm.heightPixels).toInt()}%" + if (g.durMs >= Gestures.LONG_PRESS_MS) " (길게 ${g.durMs}ms)" else ""
         }
-        LogStore.add("기록 $n: $what · 이전 동작 후 ${gap / 100 / 10.0}초" + (if (popup != null) " · 팝업 '$popup'(없어도 진행)" else ""))
+        LogStore.add(
+            "기록 $n: $what · 이전 동작 후 ${gap / 100 / 10.0}초" + (if (popup != null) " · 팝업 '$popup'(없어도 진행)" else "") +
+                (if (ref != null) " · 기준 화면 저장" else " · 기준 화면 없음"),
+        )
         main.post { recordButton?.text = "■ 기록 끝 (${n}단계)" }
 
         // 같은 동작을 아래 앱에 전달하는 동안만 투명 창이 터치를 통과시킨다
@@ -263,13 +308,29 @@ class MacroService : AccessibilityService() {
                         MotionEvent.ACTION_DOWN -> {
                             proxyPoints.clear()
                             proxyPoints += TouchPoint(ev.rawX, ev.rawY, ev.eventTime)
+                            // 누르는 순간의 화면을 기준으로 저장(안드로이드 11+). 이 창이 터치를 받는 동안엔 아래 화면이 그대로다
+                            val shot = RefShot()
+                            curShot = shot
+                            if (Build.VERSION.SDK_INT >= 30) {
+                                refExecutor.execute {
+                                    try {
+                                        shot.grid = captureGrid()
+                                    } finally {
+                                        shot.latch.countDown()
+                                    }
+                                }
+                            } else {
+                                shot.latch.countDown()
+                            }
                         }
                         MotionEvent.ACTION_MOVE -> if (ev.pointerCount == 1) proxyPoints += TouchPoint(ev.rawX, ev.rawY, ev.eventTime)
                         MotionEvent.ACTION_UP -> {
                             proxyPoints += TouchPoint(ev.rawX, ev.rawY, ev.eventTime)
                             val g = Gestures.classify(proxyPoints.toList(), slop)
                             proxyPoints.clear()
-                            if (g != null) recordExecutor.execute { onRecordedGesture(g) }
+                            val shot = curShot
+                            curShot = null
+                            if (g != null) recordExecutor.execute { onRecordedGesture(g, shot) }
                         }
                         MotionEvent.ACTION_CANCEL -> proxyPoints.clear()
                     }
@@ -661,14 +722,32 @@ class MacroService : AccessibilityService() {
 
     /**
      * 기록한 이동 경로를 순서대로 따라간다. 실패하면 오류 결과, 성공이면 null.
-     * 각 단계 뒤에는 '화면이 다 바뀔 때까지' 기다린 다음 다음 곳을 누른다(settleAfterStep):
-     * 사람이 기다렸던 시간은 항상 기다리고(화면이 안 바뀌는 곳 대비), 그 사이 화면이 바뀌기 시작했다면 로딩이 끝나 잠잠해질 때까지 더 기다린다.
+     * 각 단계는 '원하는 화면이 나왔을 때' 누른다:
+     *  - 기록 때 저장한 기준 화면(◎)이 있으면, 지금 화면이 그 화면과 같아 보일 때까지 기다린 뒤 누른다 (awaitScreen).
+     *    글자가 없는 이미지 화면이나, 로딩 뒤 저절로 스크롤되는 화면에서도 스크롤이 끝나 그 화면이 된 다음에 누른다.
+     *  - 기준 화면이 없거나 앞 단계와 같은 화면(탭해도 안 바뀌는 곳)이면 시간 기준(settleAfterStep):
+     *    사람이 기다렸던 시간은 항상 기다리고, 그 사이 화면이 바뀌기 시작했다면 로딩이 끝나 잠잠해질 때까지 더 기다린다.
      * waitLoaded: (예전 방식) 마지막 이동 뒤 화면 로딩 완료까지 추가 대기
+     * firstScreenChecked: 첫 단계의 기준 화면은 이미 기다렸음(예약 흐름에서 앱이 뜨는 동안 미리 확인)
      */
-    private fun replayRoute(job: Job, waitLoaded: Boolean, initial: PageSig? = null): Outcome? {
+    private fun replayRoute(job: Job, waitLoaded: Boolean, initial: PageSig? = null, firstScreenChecked: Boolean = false): Outcome? {
         var cur: PageSig? = initial ?: targetRoot(job)?.let { pageSignature(it) }
         val n = job.steps.size
+        val hasRefs = job.steps.any { it.ref != null || it.endRef != null }
+        var useRefs = hasRefs && Build.VERSION.SDK_INT >= 30
+        if (hasRefs && !useRefs) LogStore.add("기준 화면은 안드로이드 11 이상에서만 사용합니다 — 시간 기준으로 진행")
+        if (useRefs) {
+            val cnt = (0 until n).count { RouteScreens.waitsBefore(job.steps, it) }
+            LogStore.add("기준 화면 사용: 원하는 화면이 뜰 때 누릅니다 (대기 ${cnt}단계${if (RouteScreens.endGrid(job.steps) != null) " + 쿠폰 화면" else ""})")
+        }
         for ((i, s) in job.steps.withIndex()) {
+            if (useRefs && !(i == 0 && firstScreenChecked) && RouteScreens.waitsBefore(job.steps, i)) {
+                val ref = ScreenRef.gridOf(s.ref)
+                if (ref == null || !awaitScreen(ref, s.hintX, s.hintY, "이동 ${i + 1}/$n")) {
+                    useRefs = false // 화면 캡처가 안 되는 기기/상태 — 이 실행은 시간 기준으로
+                    cur = settleAfterStep(job, null, Settle.minWaitMs(s.delayMs, false), "이동 ${i + 1}/$n")
+                }
+            }
             val ok = runStep(job, s, if (s.optional) 1_500 else 10_000)
             LogStore.add("이동 ${i + 1}/$n '${s.display()}' ${if (ok) "OK" else "못 찾음"}")
             if (!ok) {
@@ -676,10 +755,64 @@ class MacroService : AccessibilityService() {
                 continue // 없어도 되는 단계(팝업 닫기 등)가 안 보이면 화면이 안 바뀌었으니 기다릴 것 없이 다음으로
             }
             val last = i == n - 1
+            if (useRefs && !last && RouteScreens.waitsBefore(job.steps, i + 1)) {
+                cur = null // 다음 단계가 '원하는 화면'이 뜰 때까지 기다린다
+                continue
+            }
+            if (useRefs && last) {
+                val end = RouteScreens.endGrid(job.steps)
+                if (end != null) {
+                    if (awaitScreen(end, null, null, "쿠폰 화면")) continue
+                    useRefs = false
+                }
+            }
             cur = settleAfterStep(job, cur, Settle.minWaitMs(job.steps.getOrNull(i + 1)?.delayMs, last), "이동 ${i + 1}/$n")
         }
         if (waitLoaded && n > 0) waitForLoaded(job, "이동 완료") // 예전 방식: 쿠폰 선택은 화면 로딩이 끝난 뒤에
         return null
+    }
+
+    /**
+     * 지금 화면이 기록 때 화면(ref)과 같아 보일 때까지 기다린다 (ScreenWait 규칙: 연속 2회 일치, 최대 9초).
+     * @return true: 화면이 나타났거나 시간이 다 돼 그대로 진행 / false: 화면 캡처를 할 수 없음(시간 기준으로 전환 필요)
+     */
+    private fun awaitScreen(ref: IntArray, fx: Float?, fy: Float?, why: String): Boolean {
+        val start = SystemClock.elapsedRealtime()
+        val w = ScreenWait(ref, fx, fy, start)
+        var fails = 0
+        var lastLog = start
+        fun pct(v: Float?) = "${((v ?: 0f) * 100).toInt()}%"
+        while (true) {
+            checkCancel()
+            val cur = captureGrid()
+            val now = SystemClock.elapsedRealtime()
+            if (cur == null) {
+                if (++fails >= 3) {
+                    LogStore.add("화면 캡처를 못 해 시간 기준으로 진행($why, 코드 $lastShotFail)")
+                    return false
+                }
+            } else {
+                fails = 0
+            }
+            val sc = w.last
+            when (w.update(cur, now)) {
+                ScreenVerdict.MATCH -> {
+                    val s = w.last
+                    LogStore.add("원하는 화면 확인($why): ${now - start}ms 대기 · 전체 ${pct(s?.global)} 누를 곳 주변 ${pct(s?.region)}")
+                    return true
+                }
+                ScreenVerdict.TIMEOUT -> {
+                    val s = w.last
+                    LogStore.add("원하는 화면이 ${(now - start) / 1000}초 안에 안 떠서 그대로 진행($why) · 일치 전체 ${pct(s?.global)} 누를 곳 주변 ${pct(s?.region)}")
+                    return true
+                }
+                ScreenVerdict.WAIT -> if (now - lastLog >= 2_000) {
+                    lastLog = now
+                    val s = w.last ?: sc
+                    LogStore.add("원하는 화면 대기 중($why)… 일치 전체 ${pct(s?.global)} 누를 곳 주변 ${pct(s?.region)}")
+                }
+            }
+        }
     }
 
     /**
@@ -806,9 +939,19 @@ class MacroService : AccessibilityService() {
 
         // 정각까지 기다리되, 앱 첫 화면이 다 뜬 뒤에 경로를 시작한다 (로딩 중에 누르면 엉뚱한 화면으로 넘어감)
         var start: PageSig? = null
-        if (plan.replayRoute) start = waitScreenReady(job, fireAt, offset) else waitUntil(fireAt, offset)
+        var firstChecked = false
+        if (plan.replayRoute) {
+            // 앱이 뜨는 동안 '기록 때 첫 화면'이 나타나는지 미리 지켜본다 (정각 전에 확인이 끝나 있으면 정각에 바로 시작)
+            val s0 = job.steps.firstOrNull()
+            if (s0 != null && Build.VERSION.SDK_INT >= 30 && RouteScreens.waitsBefore(job.steps, 0)) {
+                firstChecked = ScreenRef.gridOf(s0.ref)?.let { awaitScreen(it, s0.hintX, s0.hintY, "앱 첫 화면") } == true
+            }
+            start = waitScreenReady(job, fireAt, offset)
+        } else {
+            waitUntil(fireAt, offset)
+        }
         LogStore.add(if (mode == Mode.LIVE) "정각 — 경로 이동 시작" else "앱 실행 후 ${(fireAt - launchAt) / 1000.0}초 경과 — 경로 이동 시작")
-        if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps, initial = start)?.let { return it }
+        if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps, initial = start, firstScreenChecked = firstChecked)?.let { return it }
         // 쿠폰 이미지/카드가 화면에 뜨는 즉시 선택한다 (별도 로딩 대기 없음: 클릭 루프가 대상이 보일 때까지 빠르게 확인)
         LogStore.add("경로 이동 끝 — 쿠폰 선택 시작")
         return clickLoop(job, mode)
@@ -1334,6 +1477,88 @@ class MacroService : AccessibilityService() {
         val dm = resources.displayMetrics
         val x = dm.widthPixels * 0.5f
         return gesture(x, dm.heightPixels * 0.3f, x, dm.heightPixels * 0.75f, 200)
+    }
+
+    @Volatile private var lastShotAt = 0L
+    @Volatile private var lastShotFail = -1
+
+    /**
+     * 지금 화면을 ScreenRef 격자(칸별 밝기)로 읽는다. 안드로이드 11+ 에서만 가능하고, 실패하면 null(lastShotFail 에 시스템 코드).
+     * 캡처 간격 제한(약 1/3초)이 있어 호출 사이를 스스로 맞춘다. 한 번에 한 곳에서만 부른다(synchronized).
+     */
+    @Synchronized
+    @SuppressLint("NewApi")
+    private fun captureGrid(): IntArray? {
+        if (Build.VERSION.SDK_INT < 30) return null
+        repeat(3) {
+            val wait = ScreenRef.MIN_SHOT_INTERVAL_MS - (SystemClock.elapsedRealtime() - lastShotAt)
+            if (wait > 0) Thread.sleep(wait)
+            lastShotAt = SystemClock.elapsedRealtime()
+            val latch = CountDownLatch(1)
+            var grid: IntArray? = null
+            var fail = -1
+            takeScreenshot(
+                Display.DEFAULT_DISPLAY,
+                shotCbExecutor,
+                object : AccessibilityService.TakeScreenshotCallback {
+                    override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                        try {
+                            val hb = result.hardwareBuffer
+                            val hw = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
+                            val soft = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                            hw?.recycle()
+                            hb.close()
+                            if (soft != null) {
+                                grid = bitmapToGrid(soft)
+                                soft.recycle()
+                            }
+                        } catch (e: Exception) {
+                            LogStore.add("화면 캡처 변환 실패: $e")
+                        } finally {
+                            latch.countDown()
+                        }
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        fail = errorCode
+                        latch.countDown()
+                    }
+                },
+            )
+            latch.await(3, TimeUnit.SECONDS)
+            grid?.let { return it }
+            lastShotFail = fail
+            if (fail != 3) return null // 3: 너무 자주 캡처 — 간격을 두고 한 번 더. 그 외는 포기
+        }
+        return null
+    }
+
+    /** 화면 비트맵 -> ScreenRef 격자(칸별 평균 밝기). 반씩 줄여 가며 면적 평균에 가깝게 줄인다 */
+    private fun bitmapToGrid(src: Bitmap): IntArray {
+        val cell = 4
+        val tw = ScreenRef.COLS * cell
+        val th = ScreenRef.ROWS * cell
+        var bmp = src
+        while (bmp.width >= tw * 2 && bmp.height >= th * 2) {
+            val next = Bitmap.createScaledBitmap(bmp, bmp.width / 2, bmp.height / 2, true)
+            if (bmp !== src) bmp.recycle()
+            bmp = next
+        }
+        val small = Bitmap.createScaledBitmap(bmp, tw, th, true)
+        val px = IntArray(tw * th)
+        small.getPixels(px, 0, tw, 0, 0, tw, th)
+        if (small !== bmp) small.recycle()
+        if (bmp !== src) bmp.recycle()
+        val out = IntArray(ScreenRef.SIZE)
+        for (r in 0 until ScreenRef.ROWS) for (c in 0 until ScreenRef.COLS) {
+            var sum = 0
+            for (dy in 0 until cell) for (dx in 0 until cell) {
+                val p = px[(r * cell + dy) * tw + c * cell + dx]
+                sum += (Color.red(p) * 299 + Color.green(p) * 587 + Color.blue(p) * 114) / 1000
+            }
+            out[r * ScreenRef.COLS + c] = sum / (cell * cell)
+        }
+        return out
     }
 
     private fun gesture(
