@@ -75,6 +75,40 @@ jobs:
         working-directory: android
         run: ./gradlew --no-daemon testDebugUnitTest assembleRelease -PappVersionCode=${{ github.run_number }}
 
+      # 매 빌드마다 결과를 눈에 보이게: 단위 테스트 개수/실패, lint(참고용)
+      - name: Test summary
+        if: always()
+        run: |
+          python3 - <<'EOF'
+          import glob, os
+          import xml.etree.ElementTree as ET
+          t = f = e = s = 0
+          bad = []
+          for p in glob.glob('android/app/build/test-results/testDebugUnitTest/*.xml'):
+              r = ET.parse(p).getroot()
+              t += int(r.get('tests')); f += int(r.get('failures')); e += int(r.get('errors')); s += int(r.get('skipped'))
+              for c in r.iter('testcase'):
+                  if c.find('failure') is not None or c.find('error') is not None:
+                      bad.append(c.get('classname') + '.' + c.get('name'))
+          msg = f'단위 테스트 {t}개 · 실패 {f} · 오류 {e} · 건너뜀 {s}'
+          print(msg)
+          for b in bad:
+              print('  FAIL', b)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as out:
+              out.write('### ' + msg + '\n')
+          EOF
+
+      - name: Lint (참고용 — 실패해도 빌드는 계속)
+        working-directory: android
+        continue-on-error: true
+        run: |
+          ./gradlew --no-daemon lintRelease -PappVersionCode=${{ github.run_number }} || true
+          x=app/build/reports/lint-results-release.xml
+          if [ -f "$x" ]; then
+            echo "lint: 오류 $(grep -c 'severity="Error"' "$x") · 경고 $(grep -c 'severity="Warning"' "$x")"
+            grep -B1 -A4 'severity="Error"' "$x" | head -80 || true
+          fi
+
       - name: Name APK with build date (KST)
         id: apk
         run: |

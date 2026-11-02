@@ -214,7 +214,7 @@ class MainActivity : Activity() {
         }
 
         collapsible(root, "로그") { b ->
-            b.addView(row(button("로그 복사") { copyLog() }, button("로그 지우기") { LogStore.clear() }))
+            b.addView(row(button("디버그 리포트 복사") { copyLog() }, button("로그 지우기") { LogStore.clear() }))
             logView = TextView(this).apply {
                 typeface = Typeface.MONOSPACE
                 textSize = 11f
@@ -352,8 +352,14 @@ class MainActivity : Activity() {
         }
         svc.start(job, mode)
         refreshStatus()
-        val when_ = if (mode == Mode.LIVE) " · ${Schedule.describe(job.openAtMillis, System.currentTimeMillis())}에 맞춰 대기" else ""
-        toast("시작됨$when_")
+        val now = System.currentTimeMillis()
+        val when_ = if (mode == Mode.LIVE) " · ${Schedule.describe(job.openAtMillis, now)}에 맞춰 대기" else ""
+        val longWait = if (mode == Mode.LIVE && job.openAtMillis - now > 15 * 60_000L) {
+            "\n오픈까지 한참 남았어요. 그동안 화면이 켜진 채여야 합니다 — 자동 실행(알람)을 켜면 폰을 잠가 둬도 됩니다"
+        } else {
+            ""
+        }
+        toast("시작됨$when_$longWait")
     }
 
     private fun refreshStatus() {
@@ -376,10 +382,20 @@ class MainActivity : Activity() {
         startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
     }
 
+    /** 설정 + 환경 + 최근 로그를 한 번에 복사 (문제 원인 분석용) */
     private fun copyLog() {
+        val svc = MacroService.instance
+        val env = DebugReport.Env(
+            appVersion = "${BuildConfig.VERSION_NAME} (빌드 ${BuildConfig.VERSION_CODE})",
+            sdk = Build.VERSION.SDK_INT,
+            device = "${Build.MANUFACTURER} ${Build.MODEL}",
+            accessibilityOn = svc != null,
+            running = svc?.isRunning() == true,
+        )
+        val report = DebugReport.build(env, profile.label, readForm(), LogStore.text(300))
         val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(ClipData.newPlainText("log", LogStore.text(300)))
-        toast("로그 복사됨")
+        cm.setPrimaryClip(ClipData.newPlainText("debug", report))
+        toast("디버그 리포트 복사됨 (설정 + 로그)")
     }
 
     // ---- 받을 쿠폰 ----

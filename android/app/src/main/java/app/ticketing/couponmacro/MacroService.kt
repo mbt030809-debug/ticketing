@@ -588,7 +588,7 @@ class MacroService : AccessibilityService() {
     // ---- 작업 실행 ----
     private fun runJob(job: Job, mode: Mode) {
         dots = job.showDots
-        acquireWakeLock()
+        acquireWakeLock(Flow.wakeLockMs(job, mode, System.currentTimeMillis()))
         setKeepScreenOn(true)
         try {
             LogStore.add("== 시작: ${job.name} [${mode.name}] ==")
@@ -628,17 +628,23 @@ class MacroService : AccessibilityService() {
      */
     private fun executeAtOpen(job: Job, offset: Long): Outcome {
         val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.KOREA)
-        val hasRoute = job.steps.isNotEmpty()
-        val launchAt = job.openAtMillis - job.launchLeadMs
-        val fireAt = job.openAtMillis - job.leadMs
+        val plan = Flow.plan(job, Mode.LIVE, appInFront = false)
+        val hasRoute = plan.replayRoute
+        val tl = Flow.timeline(job)
+        val launchAt = tl.launchAtMs
+        val fireAt = tl.fireAtMs
+        val waitMin = (launchAt - (System.currentTimeMillis() + offset)) / 60_000
+        if (waitMin >= 10) {
+            LogStore.add("오픈까지 ${waitMin}분 — 그동안 화면이 켜진 채로 유지됩니다 (자동 실행(알람)을 켜면 폰을 잠가 둬도 됩니다)")
+        }
         LogStore.add(
             "예약 흐름: 앱 실행 ${fmt.format(Date(launchAt))} → 경로 이동 ${fmt.format(Date(fireAt))}(정각) → 쿠폰 받기" +
                 if (hasRoute) " · 경로 ${job.steps.size}단계" else " · 기록한 경로 없음(현재 화면에서 이어서)",
         )
 
-        if (job.launchApp) {
+        if (plan.launch) {
             waitUntil(launchAt, offset)
-            if (!launch(job.pkg, fresh = hasRoute)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
+            if (!launch(job.pkg, fresh = plan.freshStart)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
             LogStore.add(if (hasRoute) "앱 실행(첫 화면에서 시작): ${job.pkg}" else "앱을 앞으로 가져옴(현재 화면 유지): ${job.pkg}")
             if (!waitForeground(job, 3_000)) {
                 LogStore.add("대상 앱이 자동으로 열리지 않았습니다 (백그라운드 실행 제한일 수 있음) — 직접 열어 주세요")
@@ -650,7 +656,7 @@ class MacroService : AccessibilityService() {
 
         waitUntil(fireAt, offset)
         LogStore.add("정각 — 경로 이동 시작")
-        if (hasRoute) replayRoute(job, waitLoaded = false)?.let { return it }
+        if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps)?.let { return it }
         // 쿠폰 페이지 로딩이 끝나길 잠깐(최대 4초, 0.5초 안정) 확인하고, 이때 읽은 화면을 결과 판별 기준으로 저장
         waitForLoaded(job, "이동 완료", maxMs = 4_000, quietMs = 500)
         lastPageTexts?.let { baseline = it }
@@ -705,39 +711,36 @@ class MacroService : AccessibilityService() {
         // 예약 실행(기본): 오픈 N초 전 앱 실행 → 정각에 경로 이동 → 쿠폰 받기
         if (mode == Mode.LIVE && job.routeAtOpen) return executeAtOpen(job, offset)
 
-        // (경로 이동을 미리 해 두는 방식 / 테스트) 경로가 있으면 앱 첫 화면에서 새로 시작해 경로를 따라가고, 없으면 지금 화면에서 진행
-        val live = mode == Mode.LIVE
-        val hasRoute = job.steps.isNotEmpty()
-        val fresh = hasRoute // 경로가 있으면 항상 앱 첫 화면에서 시작해 기록한 순서대로 따라간다 (즉시 실행/찾기만 포함)
-        val needLaunch = if (live) job.launchApp else (hasRoute || targetRoot(job) == null)
-        if (needLaunch) {
-            if (!launch(job.pkg, fresh)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
-            LogStore.add(if (fresh) "앱 실행(첫 화면에서 시작): ${job.pkg}" else "앱을 앞으로 가져옴(현재 화면 유지): ${job.pkg}")
+        // (경로 이동을 미리 해 두는 방식 / 테스트) 단계 구성은 Flow.plan 이 정한다 (단위 테스트로 고정)
+        val plan = Flow.plan(job, mode, appInFront = targetRoot(job) != null)
+        if (plan.launch) {
+            if (!launch(job.pkg, plan.freshStart)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
+            LogStore.add(if (plan.freshStart) "앱 실행(첫 화면에서 시작): ${job.pkg}" else "앱을 앞으로 가져옴(현재 화면 유지): ${job.pkg}")
             sleep(1500)
             if (!waitForeground(job, 6_000)) {
                 LogStore.add("대상 앱이 자동으로 열리지 않았습니다 (백그라운드 실행 제한일 수 있음) — 직접 열어 주세요")
                 Alerts.warn(this, "앱을 직접 열어 주세요", "${job.name}: 대상 앱이 자동으로 열리지 않았습니다. 앱을 열면 매크로가 이어서 진행합니다")
             }
             waitForLoaded(job, "앱 시작", maxMs = 10_000)
-        } else if (live) {
+        } else if (plan.waitForOpen) {
             LogStore.add("앱 실행 생략 — 대상 앱의 쿠폰 화면으로 직접 이동해 두세요")
         } else {
             LogStore.add("테스트: 기록한 경로가 없어 지금 보이는 화면에서 시도합니다")
         }
 
-        if (hasRoute) replayRoute(job, waitLoaded = true)?.let { return it }
+        if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps)?.let { return it }
 
-        if (mode == Mode.LIVE) {
+        if (plan.waitForOpen) {
             val fmt = SimpleDateFormat("MM-dd HH:mm:ss", Locale.KOREA)
             LogStore.add("대기: 오픈 ${fmt.format(Date(job.openAtMillis))} (lead ${job.leadMs}ms)")
-            val fireAt = job.openAtMillis - job.leadMs
+            val fireAt = Flow.timeline(job).fireAtMs
             // 이미지 쿠폰은 오픈 8초 전쯤 OCR 로 위치를 미리 계산해 둔다 (오픈 순간엔 계산 없이 바로 탭)
-            if (job.coupons.isNotEmpty() && ocrSupported()) {
+            if (plan.prelocateOcr && ocrSupported()) {
                 if (fireAt - (System.currentTimeMillis() + offset) > 9_000) waitUntil(fireAt - 8_000, offset)
                 prelocate(job)
             }
             // 오래 전에 열어 둔 페이지는 낡았을 수 있어 오픈 3초 전에 한 번 새로고침
-            if (job.refreshOnMiss && fireAt - (System.currentTimeMillis() + offset) > 3500) {
+            if (plan.preRefresh && fireAt - (System.currentTimeMillis() + offset) > 3500) {
                 waitUntil(fireAt - 3000, offset)
                 if (targetRoot(job) != null) {
                     swipeDown()
@@ -751,8 +754,9 @@ class MacroService : AccessibilityService() {
                 targetRoot(job)?.let { baseline = snapshotTexts(it) }
             }
             waitUntil(fireAt, offset)
+        } else {
+            waitForLoaded(job, "선택 전")
         }
-        if (mode != Mode.LIVE) waitForLoaded(job, "선택 전")
         return clickLoop(job, mode)
     }
 
@@ -837,7 +841,7 @@ class MacroService : AccessibilityService() {
                     // 못 찾은 이유 (처음 한 번 + 가끔 다시)
                     if (misses == 3 || misses % 40 == 0) explainMiss(job, root)
                     // 화면을 당겨 새로고침하는 건 예약 실행에서만 (테스트 중 화면이 위로 밀리지 않도록)
-                    if (mode == Mode.LIVE && job.refreshOnMiss && misses % 8 == 0) {
+                    if (Flow.plan(job, mode, appInFront = true).pullRefreshOnMiss && misses % 8 == 0) {
                         swipeDown()
                         LogStore.add("#$attempt 쿠폰이 안 보임 → 새로고침")
                     }
@@ -1485,10 +1489,10 @@ class MacroService : AccessibilityService() {
         }
     }
 
-    private fun acquireWakeLock() {
+    private fun acquireWakeLock(timeoutMs: Long) {
         val pm = getSystemService(POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "couponmacro:job").apply {
-            acquire(60 * 60 * 1000L)
+            acquire(timeoutMs)
         }
     }
 
