@@ -1,13 +1,22 @@
 package app.ticketing.couponmacro
 
 import android.content.Context
+import android.content.SharedPreferences
 
-/** 입력값 저장/복원 (SharedPreferences). */
+/** 프로필별 입력값 저장/복원 (SharedPreferences). 앱을 업데이트해도 유지된다. */
 object Store {
-    private const val FILE = "form"
+    private fun prefs(ctx: Context, name: String): SharedPreferences =
+        ctx.getSharedPreferences(name, Context.MODE_PRIVATE)
 
-    fun save(ctx: Context, f: FormState) {
-        ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE).edit()
+    fun lastProfileId(ctx: Context): String = prefs(ctx, "app").getString("last", Presets.ALL[0].id).orEmpty()
+
+    fun setLastProfile(ctx: Context, id: String) {
+        prefs(ctx, "app").edit().putString("last", id).commit()
+    }
+
+    fun save(ctx: Context, id: String, f: FormState) {
+        // commit(): 앱 전환/강제 종료 직전에도 확실히 기록
+        prefs(ctx, "form_$id").edit()
             .putString("name", f.name)
             .putString("pkg", f.pkg)
             .putBoolean("launchApp", f.launchApp)
@@ -23,12 +32,23 @@ object Store {
             .putString("already", f.already)
             .putString("soldout", f.soldout)
             .putBoolean("refreshOnMiss", f.refreshOnMiss)
-            .apply()
+            .commit()
     }
 
-    fun load(ctx: Context): FormState {
-        val p = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
-        if (!p.contains("pkg")) return Presets.COUPANG
+    /** 저장된 값이 없으면 null (구버전 단일 폼은 패키지로 판별해 해당 프로필로 이전). */
+    fun load(ctx: Context, id: String): FormState? {
+        val p = prefs(ctx, "form_$id")
+        if (p.contains("pkg")) return read(p)
+        val old = prefs(ctx, "form")
+        if (old.contains("pkg")) {
+            val f = read(old)
+            val isCoupang = f.pkg == Presets.COUPANG.defaults.pkg
+            if ((id == Presets.COUPANG.id) == isCoupang) return f
+        }
+        return null
+    }
+
+    private fun read(p: SharedPreferences): FormState {
         val d = FormState()
         return FormState(
             name = p.getString("name", d.name).orEmpty(),

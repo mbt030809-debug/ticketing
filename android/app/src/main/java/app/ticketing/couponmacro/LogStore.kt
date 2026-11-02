@@ -23,6 +23,9 @@ object LogStore {
     /** 최신 줄이 위로 오도록 */
     fun text(max: Int = 80): String = synchronized(this) { lines.toList().asReversed().take(max).joinToString("\n") }
 
+    /** 가장 최근 로그 한 줄 (상태 표시용) */
+    fun last(): String = synchronized(this) { lines.lastOrNull().orEmpty() }
+
     fun clear() {
         synchronized(this) { lines.clear() }
         listener?.invoke()

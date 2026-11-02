@@ -59,7 +59,7 @@ data class FormState(
     val openAt: String = "",
     val leadMs: String = "100",
     val intervalMs: String = "100",
-    val maxAttempts: String = "100",
+    val maxAttempts: String = "200",
     val resultWaitSec: String = "3",
     val steps: String = "",
     val popups: String = "닫기, 나중에",
@@ -109,22 +109,33 @@ data class FormState(
     }
 }
 
-/** 시작용 기본값. 문구/경로는 예시이므로 [화면 요소 덤프]로 실제 문구 확인 후 수정할 것. */
+/**
+ * 이벤트 프로필. 프로필마다 설정이 따로 저장된다.
+ * appKeywords: 패키지가 비어 있을 때 설치된 앱 이름에서 자동으로 찾는 키워드.
+ */
+data class Profile(val id: String, val label: String, val defaults: FormState, val appKeywords: List<String>)
+
+/** 시작용 기본값. 문구는 예시이므로 [화면 요소 보기]로 실제 문구 확인 후 고급 설정에서 수정할 것. */
 object Presets {
-    val COUPANG = FormState(
-        name = "쿠팡 와우멤버데이",
-        pkg = "com.coupang.mobile",
+    private val COMMON = FormState(
         targets = "쿠폰 받기, 쿠폰받기, 쿠폰 다운로드",
         success = "발급, 받기 완료, 다운로드 완료",
         already = "이미 받, 이미 발급",
         soldout = "소진, 마감",
     )
-    val NAVER_PLUS = FormState(
-        name = "네이버 N+ 녭다세일",
-        pkg = "",
-        targets = "쿠폰 받기, 쿠폰받기, 쿠폰 다운로드",
-        success = "발급, 받기 완료, 다운로드 완료",
-        already = "이미 받, 이미 발급",
-        soldout = "소진, 마감",
+    val COUPANG = Profile(
+        id = "coupang",
+        label = "쿠팡 와우멤버데이",
+        defaults = COMMON.copy(name = "쿠팡 와우멤버데이", pkg = "com.coupang.mobile"),
+        appKeywords = listOf("쿠팡", "coupang"),
     )
+    val NAVER_PLUS = Profile(
+        id = "naverplus",
+        label = "N+ 녭다세일",
+        defaults = COMMON.copy(name = "N+ 녭다세일", pkg = ""),
+        appKeywords = listOf("네이버플러스", "네이버 플러스", "N+ 스토어", "N+스토어"),
+    )
+    val ALL = listOf(COUPANG, NAVER_PLUS)
+
+    fun byId(id: String): Profile = ALL.firstOrNull { it.id == id } ?: ALL[0]
 }
