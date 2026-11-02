@@ -29,20 +29,21 @@ class JobTest {
     }
 
     @Test
-    fun stepsSupportPositionHintsAndIconTaps() {
-        val steps = Parse.steps("녭다세일@0.2000,0.3500\n@0.5000,0.9000\n?닫기@0.5,0.8\n쿠폰함")
+    fun stepsParsePositionTapsWithRecordedGaps() {
+        val steps = Parse.steps("@0.2000,0.3500~1200\n@0.5000,0.9000\n?닫기@0.5,0.8~400\n혜택@0.1,0.2\n쿠폰함")
         assertEquals(
             listOf(
-                Step("녭다세일", false, 0.2f, 0.35f),   // 글자 + 위치 힌트(같은 글자가 여러 곳이면 가까운 것)
-                Step("", false, 0.5f, 0.9f),           // 글자 없는 아이콘: 위치 탭
-                Step("닫기", true, 0.5f, 0.8f),
-                Step("쿠폰함", false),
+                Step("", false, 0.2f, 0.35f, 1200),   // 눌렀던 위치 + 이전 클릭 후 1.2초
+                Step("", false, 0.5f, 0.9f, null),
+                Step("닫기", true, 0.5f, 0.8f, 400),   // 팝업 닫기: 없어도 진행
+                Step("혜택", false, 0.1f, 0.2f, null), // 글자 + 위치 힌트
+                Step("쿠폰함", false),                  // 글자만 (직접 적은 경우)
             ),
             steps,
         )
-        assertTrue(steps[1].isTap)
-        assertFalse(steps[0].isTap)
-        assertEquals("(아이콘 탭)", steps[1].display())
+        assertTrue(steps[0].isTap)
+        assertFalse(steps[3].isTap)
+        assertEquals("(탭 20%,35%)", steps[0].display())
         assertEquals("?닫기", steps[2].display())
     }
 
@@ -53,27 +54,26 @@ class JobTest {
     }
 
     @Test
-    fun routeRecordingBuildsLinesForLabelledAndIconClicks() {
-        // 글자 있는 요소: 글자 + 위치 힌트 / 아이콘만: 위치만 / 아무것도 모르면 기록 불가
-        assertEquals("녭다세일@0.2000,0.3500", RouteSteps.line("녭다세일", 0.2f, 0.35f))
-        assertEquals("@0.2000,0.3500", RouteSteps.line(null, 0.2f, 0.35f))
-        assertEquals("혜택", RouteSteps.line("혜택", null, null))
-        assertNull(RouteSteps.line(null, null, null))
-        assertNull(RouteSteps.line("  ", null, 0.5f))
-        // 글자 속 '@' 는 위치 표시와 헷갈리지 않게 공백으로
-        assertEquals("a b@0.1000,0.2000", RouteSteps.line("a@b", 0.1f, 0.2f))
-        // 기록한 줄은 그대로 다시 읽힌다
-        val back = Parse.steps(RouteSteps.line("녭다세일", 0.2f, 0.35f)!! + "\n" + RouteSteps.line(null, 0.5f, 0.9f)!!)
-        assertEquals(listOf(Step("녭다세일", false, 0.2f, 0.35f), Step("", false, 0.5f, 0.9f)), back)
-    }
-
-    @Test
-    fun popupLinesAreRecognizedByTheirTextPart() {
+    fun routeRecordingStoresPositionsAndGapsOnly() {
         val words = listOf("닫기", "나중에")
-        assertTrue(RouteSteps.isPopup("닫기@0.5000,0.8000", words))
-        assertTrue(RouteSteps.isPopup("나중에", words))
-        assertFalse(RouteSteps.isPopup("쿠폰함@0.5000,0.8000", words))
-        assertFalse(RouteSteps.isPopup("@0.5000,0.8000", words))
+        // 눌린 위치와 간격이 핵심 — 글자는 저장하지 않는다
+        assertEquals("@0.2000,0.3500~1200", RouteSteps.line("녭다세일", 0.2f, 0.35f, 1200, words))
+        assertEquals("@0.5000,0.9000", RouteSteps.line(null, 0.5f, 0.9f, null, words))
+        // 팝업 닫기 류는 매번 뜨지 않으므로 '없어도 진행'
+        assertEquals("?닫기@0.5000,0.8000~400", RouteSteps.line("닫기", 0.5f, 0.8f, 400, words))
+        // 위치를 모르면 기록 불가
+        assertNull(RouteSteps.line("x", null, 0.5f, 100, words))
+        assertNull(RouteSteps.line("x", 0.5f, null, 100, words))
+        // 기록한 줄들은 그대로 다시 읽혀 같은 순서로 재생된다
+        val lines = listOf(
+            RouteSteps.line("a", 0.1f, 0.2f, 900, words)!!,
+            RouteSteps.line("닫기", 0.5f, 0.8f, 300, words)!!,
+            RouteSteps.line(null, 0.7f, 0.6f, 1500, words)!!,
+        )
+        assertEquals(
+            listOf(Step("", false, 0.1f, 0.2f, 900), Step("닫기", true, 0.5f, 0.8f, 300), Step("", false, 0.7f, 0.6f, 1500)),
+            Parse.steps(lines.joinToString("\n")),
+        )
     }
 
     @Test

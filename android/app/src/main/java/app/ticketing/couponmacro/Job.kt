@@ -10,35 +10,39 @@ import java.time.temporal.ChronoUnit
 enum class Mode { LIVE, NOW, DRY }
 
 /**
- * 이동 단계 한 칸.
- *  - 글자 단계:        "혜택"            글자가 보이면 클릭
- *  - 글자 + 위치 힌트: "혜택@0.20,0.35"   같은 글자가 여러 곳이면 힌트(화면 비율)에 가장 가까운 것을 클릭
- *  - 위치(아이콘) 단계: "@0.50,0.90"       글자가 없는 아이콘 — 저장한 화면 비율 위치를 탭
- *  - 앞에 ? 를 붙이면 없어도 진행(optional)
+ * 이동 단계 한 칸 — 경로는 '눌렀던 위치'를 기억해 같은 순서·간격으로 다시 누르는 방식이 기본이다.
+ *  - 위치 탭:          "@0.2000,0.3500~1200"  화면 비율 위치를 탭. ~뒤는 사람이 이전 클릭 후 기다린 시간(ms, 재생 시 최대 3초)
+ *  - 글자 단계:        "혜택"                 글자가 보이면 클릭 (직접 적을 때)
+ *  - 글자 + 위치 힌트: "혜택@0.20,0.35"        같은 글자가 여러 곳이면 힌트에 가장 가까운 것을 클릭
+ *  - 앞에 ? 를 붙이면 없어도 진행(optional) — 팝업 닫기처럼 매번 뜨지 않는 것
  */
-data class Step(val text: String, val optional: Boolean, val hintX: Float? = null, val hintY: Float? = null) {
-    /** 글자 없이 위치만으로 탭하는 단계(아이콘) */
+data class Step(
+    val text: String,
+    val optional: Boolean,
+    val hintX: Float? = null,
+    val hintY: Float? = null,
+    val delayMs: Long? = null,
+) {
+    /** 글자 없이 위치만으로 탭하는 단계 */
     val isTap: Boolean get() = text.isEmpty() && hintX != null && hintY != null
 
     /** 화면/리포트 표시용 */
-    fun display(): String = (if (optional) "?" else "") + (if (isTap) "(아이콘 탭)" else text)
+    fun display(): String = (if (optional) "?" else "") +
+        if (isTap) "(탭 ${(hintX!! * 100).toInt()}%,${(hintY!! * 100).toInt()}%)" else text
 }
 
-/** 경로 기록: 눌린 요소를 이동 단계 한 줄로 만든다 (순수 함수) */
+/** 경로 기록: 눌린 위치와 간격을 이동 단계 한 줄로 만든다 (순수 함수) */
 object RouteSteps {
-    /** label=글자(없으면 null), fx/fy=눌린 위치의 화면 비율(모르면 null). 둘 다 없으면 null(기록 불가) */
-    fun line(label: String?, fx: Float?, fy: Float?): String? {
-        val pos = if (fx != null && fy != null) String.format(java.util.Locale.ROOT, "@%.4f,%.4f", fx, fy) else ""
-        val text = label?.replace('@', ' ')?.trim().orEmpty()
-        return when {
-            text.isNotEmpty() -> text + pos
-            pos.isNotEmpty() -> pos
-            else -> null
-        }
+    /**
+     * fx/fy: 눌린 위치의 화면 비율(모르면 null → 기록 불가), delayMs: 이전 클릭 후 흐른 시간.
+     * 글자는 저장하지 않는다(위치만). 단, 팝업 닫기 류("닫기" 등)는 매번 뜨지 않으므로 '없어도 진행'(?글자) 단계로 저장.
+     */
+    fun line(label: String?, fx: Float?, fy: Float?, delayMs: Long?, popupWords: List<String>): String? {
+        if (fx == null || fy == null) return null
+        val pos = String.format(java.util.Locale.ROOT, "@%.4f,%.4f", fx, fy) + (if (delayMs != null) "~${delayMs.coerceAtLeast(0)}" else "")
+        val text = label?.replace('@', ' ')?.replace('~', ' ')?.trim().orEmpty()
+        return if (text.isNotEmpty() && popupWords.any { it == text }) "?$text$pos" else pos
     }
-
-    /** 매번 뜨지는 않는 팝업 닫기 류인지 (기록 줄 앞부분 글자 기준) */
-    fun isPopup(line: String, popupWords: List<String>): Boolean = popupWords.any { line.substringBefore('@').trim() == it }
 }
 
 data class Job(
@@ -84,7 +88,7 @@ object Parse {
     fun coupons(s: String): List<String> =
         s.split('\n', ';').map { it.trim() }.filter { it.isNotEmpty() }
 
-    private val STEP_POS = Regex("^(.*?)@([0-9]*\\.?[0-9]+)\\s*,\\s*([0-9]*\\.?[0-9]+)$")
+    private val STEP_POS = Regex("^(.*?)@([0-9]*\\.?[0-9]+)\\s*,\\s*([0-9]*\\.?[0-9]+)(?:~([0-9]+))?$")
 
     /** 한 줄에 하나(Step 설명 참고). 앞에 ? 를 붙이면 optional(못 찾아도 계속). */
     fun steps(s: String): List<Step> =
@@ -95,7 +99,7 @@ object Parse {
             if (m != null) {
                 val fx = m.groupValues[2].toFloatOrNull()
                 val fy = m.groupValues[3].toFloatOrNull()
-                if (fx != null && fy != null) Step(m.groupValues[1].trim(), optional, fx, fy) else null
+                if (fx != null && fy != null) Step(m.groupValues[1].trim(), optional, fx, fy, m.groupValues[4].toLongOrNull()) else null
             } else if (body.isNotEmpty()) {
                 Step(body, optional)
             } else {

@@ -132,6 +132,9 @@ class MacroService : AccessibilityService() {
     private val recorded = ArrayList<String>()
     private var recordOverlay: View? = null
     private var recordButton: Button? = null
+    private var lastRecordAt = 0L
+    private var lastRecordFx = -1f
+    private var lastRecordFy = -1f
 
     fun isRecording(): Boolean = recordPkg != null
 
@@ -141,6 +144,9 @@ class MacroService : AccessibilityService() {
         synchronized(recorded) { recorded.clear() }
         recordProfile = profileId
         if (!launch(pkg)) return false
+        lastRecordAt = SystemClock.elapsedRealtime()
+        lastRecordFx = -1f
+        lastRecordFy = -1f
         recordPkg = pkg
         showRecordOverlay()
         LogStore.add("경로 기록 시작: 쿠폰 페이지까지 평소처럼 눌러 이동한 뒤 [■ 기록 끝]")
@@ -152,8 +158,7 @@ class MacroService : AccessibilityService() {
         recordPkg = null
         hideRecordOverlay()
         val steps = synchronized(recorded) { recorded.toList() }
-        // 팝업 닫기 류는 매번 뜨는 게 아니므로 '없어도 진행'(?)으로 저장
-        val lines = steps.map { s -> if (RouteSteps.isPopup(s, POPUP_WORDS)) "?$s" else s }
+        val lines = steps // 한 줄 = 눌렀던 위치(+간격). 팝업 닫기 류는 기록 때 이미 '?글자' 로 저장됨
         if (lines.isNotEmpty()) Store.setPendingSteps(this, recordProfile, lines.joinToString("\n"))
         LogStore.add("경로 기록 끝: ${lines.size}단계")
         notifyResult(
@@ -177,20 +182,27 @@ class MacroService : AccessibilityService() {
         val src = event.source
         val r = Rect()
         src?.getBoundsInScreen(r)
-        val fx = if (src != null && !r.isEmpty) r.exactCenterX() / dm.widthPixels else null
-        val fy = if (src != null && !r.isEmpty) r.exactCenterY() / dm.heightPixels else null
-        val label = clickLabel(event)
-        val line = RouteSteps.line(label, fx, fy)
-        if (line == null) {
-            LogStore.add("기록: 눌린 곳의 글자도 위치도 알 수 없어 건너뜀 — 이동 단계에 직접 추가하세요")
+        if (src == null || r.isEmpty) {
+            LogStore.add("기록: 눌린 곳의 위치를 알 수 없어 건너뜀 — 이동 단계에 직접 추가하세요")
             return
         }
-        if (fx != null && fy != null) showDot(fx * dm.widthPixels, fy * dm.heightPixels, Color.BLUE)
+        val fx = r.exactCenterX() / dm.widthPixels
+        val fy = r.exactCenterY() / dm.heightPixels
+        val now = SystemClock.elapsedRealtime()
+        val gap = now - lastRecordAt
+        // 같은 클릭이 부모/자식 요소에서 두 번 보고되는 경우를 무시
+        if (kotlin.math.abs(fx - lastRecordFx) < 0.002f && kotlin.math.abs(fy - lastRecordFy) < 0.002f && gap < 400) return
+        val label = clickLabel(event)
+        val line = RouteSteps.line(label, fx, fy, gap, POPUP_WORDS) ?: return
+        lastRecordAt = now
+        lastRecordFx = fx
+        lastRecordFy = fy
+        showDot(fx * dm.widthPixels, fy * dm.heightPixels, Color.BLUE)
         val n = synchronized(recorded) {
-            if (recorded.lastOrNull() != line) recorded += line
+            recorded += line
             recorded.size
         }
-        LogStore.add("기록 $n: ${if (label == null) "(글자 없는 아이콘) 위치 탭 $line" else line}")
+        LogStore.add("기록 $n: 위치 ${(fx * 100).toInt()}%,${(fy * 100).toInt()}% · 이전 클릭 후 ${gap / 100 / 10.0}초" + (if (label != null) " ('$label')" else ""))
         main.post { recordButton?.text = "■ 기록 끝 (${n}단계)" }
     }
 
@@ -290,15 +302,8 @@ class MacroService : AccessibilityService() {
                 LogStore.add(if (fresh) "쿠폰 고르기: 앱 실행(첫 화면에서 시작)" else "쿠폰 고르기: 앱을 앞으로 가져옴(현재 화면 유지)")
                 sleep(2000)
             }
-            for ((i, s) in job.steps.withIndex()) {
-                val ok = runStep(job, s, 10_000)
-                LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.display()}' ${if (ok) "OK" else "못 찾음"}")
-                if (!ok && !s.optional) {
-                    LogStore.add("이동 단계 실패 — 직접 쿠폰 페이지로 이동한 뒤 [쿠폰 목록 읽기]를 누르세요")
-                    break
-                }
-                sleep(300)
-                waitForLoaded(job, "이동 ${i + 1}")
+            if (job.steps.isNotEmpty() && replayRoute(job, waitLoaded = false) != null) {
+                LogStore.add("이동 단계 실패 — 직접 쿠폰 페이지로 이동한 뒤 [쿠폰 목록 읽기]를 누르세요")
             }
             waitForLoaded(job, "이동 완료")
             showPickBar(job)
@@ -606,20 +611,43 @@ class MacroService : AccessibilityService() {
     }
 
     /** 기록한 이동 경로를 순서대로 따라간다. 실패하면 오류 결과, 성공이면 null. waitLoaded: 단계마다 화면 로딩 완료까지 대기 */
-    private fun replayRoute(job: Job, waitLoaded: Boolean): Outcome? {
+    private fun replayRoute(job: Job, waitLoaded: Boolean, initialSig: Int? = null): Outcome? {
+        var sig: Int? = initialSig ?: targetRoot(job)?.let { pageSignature(it).hash }
         for ((i, s) in job.steps.withIndex()) {
-            val ok = runStep(job, s, 10_000)
+            val ok = runStep(job, s, if (s.optional) 1_500 else 10_000)
             LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.display()}' ${if (ok) "OK" else "못 찾음"}")
             if (!ok && !s.optional) return Outcome("error", 0, "이동 단계 실패: ${s.display()}")
-            if (waitLoaded) {
+            if (i < job.steps.lastIndex) {
+                // 사람이 다음 곳을 누르기까지 기다린 시간(최대 3초)을 따르되, 화면이 바뀌면 그보다 일찍 다음 탭
+                val wait = (job.steps[i + 1].delayMs ?: 600L).coerceIn(300L, 3_000L)
+                sig = waitAfterTap(job, sig, wait)
+            } else if (waitLoaded) {
                 sleep(300)
-                waitForLoaded(job, "이동 ${i + 1}") // 다음 단계/쿠폰 선택은 화면 로딩이 끝난 뒤에
-            } else if (i < job.steps.lastIndex) {
-                // 글자 단계는 다음 대상이 나타날 때까지 waitAndClick 이 기다린다. 위치(아이콘) 탭 단계는 화면이 바뀔 시간을 조금 준다
-                sleep(if (s.isTap || job.steps[i + 1].isTap) 500 else 120)
+                waitForLoaded(job, "이동 완료") // 다음 단계/쿠폰 선택은 화면 로딩이 끝난 뒤에
             }
         }
         return null
+    }
+
+    /**
+     * 탭 뒤 화면이 바뀔 때까지(최대 maxMs) 기다린다. 바뀌면 250ms 더 안정시킨 뒤 새 시그니처를 돌려주고,
+     * 안 바뀌면(이미지 화면 등) maxMs 를 채워 기다린 뒤 기존 값을 돌려준다.
+     */
+    private fun waitAfterTap(job: Job, before: Int?, maxMs: Long): Int? {
+        val end = SystemClock.elapsedRealtime() + maxMs
+        while (SystemClock.elapsedRealtime() < end) {
+            checkCancel()
+            val root = targetRoot(job)
+            if (root != null && before != null) {
+                val sig = pageSignature(root)
+                if (sig.hasContent && sig.hash != before) {
+                    sleep(250)
+                    return sig.hash
+                }
+            }
+            Thread.sleep(100)
+        }
+        return before
     }
 
     /**
@@ -671,9 +699,15 @@ class MacroService : AccessibilityService() {
             LogStore.add("앱 실행 생략 — 대상 앱의 시작 화면에 가 있어야 합니다")
         }
 
+        // 경로 첫 탭을 늦추지 않도록, 정각 1초 전에 현재 화면 시그니처를 저장해 둔다(탭 뒤 화면 변화 감지의 기준)
+        var sig0: Int? = null
+        if (plan.replayRoute && fireAt - (System.currentTimeMillis() + offset) > 1_500) {
+            waitUntil(fireAt - 1_000, offset)
+            sig0 = targetRoot(job)?.let { pageSignature(it).hash }
+        }
         waitUntil(fireAt, offset)
         LogStore.add("정각 — 경로 이동 시작")
-        if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps)?.let { return it }
+        if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps, initialSig = sig0)?.let { return it }
         // 쿠폰 이미지/카드가 화면에 뜨는 즉시 선택한다 (별도 로딩 대기 없음: 클릭 루프가 대상이 보일 때까지 빠르게 확인)
         LogStore.add("경로 이동 끝 — 쿠폰 선택 시작")
         return clickLoop(job, Mode.LIVE)
