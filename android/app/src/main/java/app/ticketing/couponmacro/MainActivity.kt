@@ -39,7 +39,6 @@ class MainActivity : Activity() {
     private lateinit var refreshCb: CheckBox
     private lateinit var dotsCb: CheckBox
     private lateinit var routeAtOpenCb: CheckBox
-    private lateinit var manualCb: CheckBox
     private lateinit var accStatus: TextView
     private lateinit var accBox: LinearLayout
     private lateinit var statusLine: TextView
@@ -124,29 +123,6 @@ class MainActivity : Activity() {
 
         // 3) 쿠폰 페이지 가는 길
         root.addView(section("3. 쿠폰 페이지 가는 길"))
-        manualCb = CheckBox(this).apply { text = "쿠폰 페이지는 내가 직접 열어 둡니다 (권장 — 링크·경로 없이 정각에 새로고침하고 바로 받음)" }
-        manualCb.setOnCheckedChangeListener { _, _ ->
-            if (!loading) {
-                saveCurrent()
-                refreshRoute()
-            }
-        }
-        root.addView(manualCb)
-        root.addView(
-            note(
-                "시작하면(또는 자동 실행 알람 후) 대상 앱의 쿠폰 페이지를 열어 둔 채 화면을 켜 두세요. 오픈 5초 전에 앱이 앞에 없으면 열어 둔 화면 그대로 앞으로 가져오고, " +
-                    "정각에 새로고침한 뒤 쿠폰이 보이는 즉시 받으며 받을 때까지 3초마다 새로고침합니다. 앱을 최근 목록에서 닫으면 페이지가 사라지니 닫지 마세요. " +
-                    "아래 링크/경로는 이 체크를 끈 경우에만 사용합니다.",
-            ),
-        )
-        field(root, K_URL, "이벤트 페이지 링크 (선택 — 체크를 끈 경우) — 앱에서 해당 이벤트 [공유 → 링크 복사] 후 [붙여넣기]").onChanged { refreshRoute() }
-        root.addView(
-            row(
-                button("링크 붙여넣기") { pasteLink() },
-                button("링크 지우기") { fields.getValue(K_URL).setText(""); saveCurrent() },
-            ),
-        )
-        root.addView(note("링크가 있으면 경로 기록 없이 정각에 그 페이지로 바로 이동합니다(가장 빠르고 안정적). 링크가 안 열리면 아래 경로로 대체합니다."))
         routeLine = TextView(this).apply { setPadding(0, dp(4), 0, dp(4)) }
         root.addView(routeLine)
         root.addView(row(button("● 경로 기록") { startRecord() }, button("경로 지우기") { clearRoute() }))
@@ -194,7 +170,7 @@ class MainActivity : Activity() {
         root.addView(statusLine)
         root.addView(
             note(
-                "[예약 시작]: 켜진 다음 회차에 맞춰 — 수동 페이지: 쿠폰 페이지를 열어 두면 정각에 새로고침 후 바로 받기 / 링크·경로 방식: 오픈 5초 전 앱 실행 → 정각 이동 → 받기 (실행 중에는 [중지]로 바뀜). " +
+                "[예약 시작]: 켜진 다음 회차에 맞춰 — 오픈 5초 전 앱 실행 → 정각에 경로 이동 → 쿠폰 받기 (시점은 고급 설정에서 변경, 실행 중에는 [중지]로 바뀜). " +
                     "[즉시 실행]: 기다리지 않고 지금 바로 시도합니다 — 기록한 경로가 있으면 앱을 첫 화면부터 시작해 경로를 따라간 뒤 시도하고, 경로가 없으면 지금 보던 화면에서 시도합니다. 상시 받을 수 있는 쿠폰으로 연습하세요. 클릭이 나가면 빨간 점이 잠깐 뜹니다.",
             ),
         )
@@ -496,28 +472,9 @@ class MainActivity : Activity() {
         saveCurrent()
     }
 
-    /** 클립보드의 공유 문구에서 주소만 뽑아 입력 */
-    private fun pasteLink() {
-        val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-        val text = cm.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(this)?.toString().orEmpty()
-        val url = Links.extract(text)
-        if (url == null) {
-            toast("클립보드에 링크가 없습니다. 앱에서 [공유 → 링크 복사]를 먼저 하세요")
-        } else {
-            fields.getValue(K_URL).setText(url)
-            saveCurrent()
-            toast("링크를 입력했습니다")
-        }
-    }
-
     private fun refreshRoute() {
         val steps = Parse.steps(f(K_STEPS))
-        val link = Links.extract(f(K_URL))
-        routeLine.text = if (manualCb.isChecked) {
-            "수동 페이지: 쿠폰 페이지를 열어 두세요 — 링크/경로는 사용하지 않습니다."
-        } else if (link != null) {
-            "링크로 이동: ${link.take(60)}" + if (steps.isEmpty()) "" else " (링크가 안 열리면 경로 ${steps.size}단계로 대체)"
-        } else if (steps.isEmpty()) {
+        routeLine.text = if (steps.isEmpty()) {
             "경로 없음 — 시작하면 앱만 열립니다. 직접 쿠폰 페이지로 이동해 두거나 아래에서 기록하세요."
         } else {
             "경로 ${steps.size}단계: " + steps.joinToString(" → ") { (if (it.optional) "(" else "") + (if (it.isTap) "아이콘 탭" else it.text) + (if (it.optional) ")" else "") }
@@ -740,12 +697,12 @@ class MainActivity : Activity() {
         name = profile.label, pkg = f(K_PKG).trim(), launchApp = launchCb.isChecked,
         openAt = "", leadMs = f(K_LEAD), intervalMs = f(K_INTERVAL),
         maxAttempts = f(K_ATTEMPTS), resultWaitSec = f(K_WAIT),
-        eventUrl = f(K_URL), steps = f(K_STEPS), popups = f(K_POPUPS), targets = f(K_TARGETS), coupons = f(K_COUPONS),
+        steps = f(K_STEPS), popups = f(K_POPUPS), targets = f(K_TARGETS), coupons = f(K_COUPONS),
         success = f(K_SUCCESS), already = f(K_ALREADY), soldout = f(K_SOLDOUT),
         refreshOnMiss = refreshCb.isChecked,
         slots = slotsText, slotsOff = slotsOff,
         autoRun = autoCb.isChecked, warnSec = f(K_WARN),
-        routeAtOpen = routeAtOpenCb.isChecked, launchLeadSec = f(K_LAUNCH), manualPage = manualCb.isChecked,
+        routeAtOpen = routeAtOpenCb.isChecked, launchLeadSec = f(K_LAUNCH),
         showDots = dotsCb.isChecked,
     )
 
@@ -758,7 +715,6 @@ class MainActivity : Activity() {
         fields.getValue(K_INTERVAL).setText(s.intervalMs)
         fields.getValue(K_ATTEMPTS).setText(s.maxAttempts)
         fields.getValue(K_WAIT).setText(s.resultWaitSec)
-        fields.getValue(K_URL).setText(s.eventUrl)
         fields.getValue(K_STEPS).setText(s.steps)
         fields.getValue(K_POPUPS).setText(s.popups)
         fields.getValue(K_TARGETS).setText(s.targets)
@@ -771,7 +727,6 @@ class MainActivity : Activity() {
         fields.getValue(K_WARN).setText(s.warnSec)
         fields.getValue(K_LAUNCH).setText(s.launchLeadSec)
         routeAtOpenCb.isChecked = s.routeAtOpen
-        manualCb.isChecked = s.manualPage
         autoCb.isChecked = s.autoRun
         applySlots(s.slots, s.slotsOff)
         } finally {
@@ -861,7 +816,6 @@ class MainActivity : Activity() {
         private const val K_ATTEMPTS = "maxAttempts"
         private const val K_WAIT = "resultWaitSec"
         private const val K_STEPS = "steps"
-        private const val K_URL = "eventUrl"
         private const val K_POPUPS = "popups"
         private const val K_TARGETS = "targets"
         private const val K_COUPONS = "coupons"

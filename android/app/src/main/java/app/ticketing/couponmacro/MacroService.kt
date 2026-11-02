@@ -8,7 +8,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
-import android.net.Uri
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.graphics.Path
@@ -291,10 +290,7 @@ class MacroService : AccessibilityService() {
                 LogStore.add(if (fresh) "쿠폰 고르기: 앱 실행(첫 화면에서 시작)" else "쿠폰 고르기: 앱을 앞으로 가져옴(현재 화면 유지)")
                 sleep(2000)
             }
-            val before = targetRoot(job)?.let { pageSignature(it).hash }
-            val viaLink = job.eventUrl.isNotBlank() && openLink(job)
-            if (viaLink) waitPageChange(job, before, 4_000)
-            for ((i, s) in (if (viaLink) emptyList() else job.steps).withIndex()) {
+            for ((i, s) in job.steps.withIndex()) {
                 val ok = runStep(job, s, 10_000)
                 LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.display()}' ${if (ok) "OK" else "못 찾음"}")
                 if (!ok && !s.optional) {
@@ -609,46 +605,6 @@ class MacroService : AccessibilityService() {
         }
     }
 
-    /** 이벤트 링크를 대상 앱에서 연다. 앱이 그 주소를 열 수 없으면 false(→ 기록한 경로로 대체) */
-    private fun openLink(job: Job): Boolean = try {
-        startActivity(
-            Intent(Intent.ACTION_VIEW, Uri.parse(job.eventUrl))
-                .setPackage(job.pkg)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-        )
-        LogStore.add("이벤트 링크 열기: ${job.eventUrl}")
-        true
-    } catch (e: Exception) {
-        LogStore.add("대상 앱이 이 링크를 열지 못합니다(${e.javaClass.simpleName}) — 기록한 경로로 대체합니다")
-        false
-    }
-
-    /** 링크로 연 페이지가 이전 화면과 달라질 때까지(= 새 페이지가 뜰 때까지) 최대 timeoutMs 대기 */
-    private fun waitPageChange(job: Job, before: Int?, timeoutMs: Long): Boolean {
-        val end = SystemClock.elapsedRealtime() + timeoutMs
-        while (SystemClock.elapsedRealtime() < end) {
-            checkCancel()
-            val root = targetRoot(job)
-            if (root != null) {
-                val sig = pageSignature(root)
-                if (sig.hasContent && (before == null || sig.hash != before)) return true
-            }
-            Thread.sleep(80)
-        }
-        LogStore.add("새 페이지로 바뀐 것을 확인하지 못했지만 그대로 진행합니다")
-        return false
-    }
-
-    /** 쿠폰 페이지로 이동: 링크가 있으면 링크로 바로, 안 열리면(또는 링크가 없으면) 기록한 경로로 */
-    private fun goToEventPage(job: Job, plan: FlowPlan, before: Int?): Outcome? {
-        if (plan.useLink && openLink(job)) {
-            waitPageChange(job, before, 4_000)
-            return null
-        }
-        if (plan.replayRoute) return replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps)
-        return null
-    }
-
     /** 기록한 이동 경로를 순서대로 따라간다. 실패하면 오류 결과, 성공이면 null. waitLoaded: 단계마다 화면 로딩 완료까지 대기 */
     private fun replayRoute(job: Job, waitLoaded: Boolean): Outcome? {
         for ((i, s) in job.steps.withIndex()) {
@@ -684,40 +640,12 @@ class MacroService : AccessibilityService() {
     }
 
     /**
-     * 수동 페이지: 사용자가 쿠폰 페이지를 직접 열어 둔다. 오픈 launchLeadMs 전에 대상 앱이 앞에 없으면 앞으로 가져오고
-     * (열어 둔 화면 그대로), 정각에 한 번 새로고침한 뒤 쿠폰이 보이는 즉시 받는다. 받을 때까지 3초마다 새로고침.
-     */
-    private fun executeManualPage(job: Job, offset: Long): Outcome {
-        val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.KOREA)
-        val tl = Flow.timeline(job)
-        LogStore.add("수동 페이지: 쿠폰 페이지를 열어 두세요 — 정각 ${fmt.format(Date(tl.fireAtMs))}에 새로고침하고 바로 받습니다")
-        waitUntil(tl.launchAtMs, offset)
-        if (targetRoot(job) == null) {
-            if (!launch(job.pkg, fresh = false)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
-            LogStore.add("대상 앱을 앞으로 가져옴(열어 둔 화면 유지)")
-            if (!waitForeground(job, 3_000)) {
-                LogStore.add("대상 앱이 앞으로 나오지 않았습니다 — 쿠폰 페이지를 열어 주세요")
-                Alerts.warn(this, "쿠폰 페이지를 열어 주세요", "${job.name}: 대상 앱의 쿠폰 페이지를 열어 두면 정각에 자동으로 받습니다")
-            }
-        }
-        waitUntil(tl.fireAtMs, offset)
-        if (Flow.plan(job, Mode.LIVE, appInFront = true).refreshAtOpen && targetRoot(job) != null) {
-            swipeDown()
-            LogStore.add("정각 — 새로고침 후 쿠폰 받기 시작")
-        } else {
-            LogStore.add("정각 — 쿠폰 받기 시작")
-        }
-        return clickLoop(job, Mode.LIVE)
-    }
-
-    /**
      * 예약 실행(기본 흐름): 오픈 launchLeadMs(기본 5초) 전 앱 실행 → 오픈 정각(lead 보정)에 경로 이동 → 쿠폰 받기.
      * 경로 이동은 정각에 시작하므로 단계마다 오래 기다리지 않고, 마지막에만 짧게 화면 로딩 완료를 확인한 뒤 쿠폰을 누른다.
      */
     private fun executeAtOpen(job: Job, offset: Long): Outcome {
         val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.KOREA)
-        val plan = Flow.plan(job, Mode.LIVE, appInFront = targetRoot(job) != null)
-        if (plan.manualPage) return executeManualPage(job, offset)
+        val plan = Flow.plan(job, Mode.LIVE, appInFront = false)
         val hasRoute = plan.replayRoute
         val tl = Flow.timeline(job)
         val launchAt = tl.launchAtMs
@@ -743,15 +671,9 @@ class MacroService : AccessibilityService() {
             LogStore.add("앱 실행 생략 — 대상 앱의 시작 화면에 가 있어야 합니다")
         }
 
-        // 링크로 열 때: 정각 직전(1초 전)의 화면을 기억해 두었다가, 링크를 연 뒤 화면이 바뀌는 순간을 감지한다
-        var before: Int? = null
-        if (plan.useLink && fireAt - (System.currentTimeMillis() + offset) > 1_500) {
-            waitUntil(fireAt - 1_000, offset)
-            before = targetRoot(job)?.let { pageSignature(it).hash }
-        }
         waitUntil(fireAt, offset)
-        LogStore.add(if (plan.useLink) "정각 — 이벤트 링크로 이동" else "정각 — 경로 이동 시작")
-        goToEventPage(job, plan, before)?.let { return it }
+        LogStore.add("정각 — 경로 이동 시작")
+        if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps)?.let { return it }
         // 쿠폰 이미지/카드가 화면에 뜨는 즉시 선택한다 (별도 로딩 대기 없음: 클릭 루프가 대상이 보일 때까지 빠르게 확인)
         LogStore.add("경로 이동 끝 — 쿠폰 선택 시작")
         return clickLoop(job, Mode.LIVE)
@@ -800,7 +722,7 @@ class MacroService : AccessibilityService() {
         }
 
         // 예약 실행(기본): 오픈 N초 전 앱 실행 → 정각에 경로 이동 → 쿠폰 받기
-        if (mode == Mode.LIVE && (job.routeAtOpen || job.manualPage)) return executeAtOpen(job, offset)
+        if (mode == Mode.LIVE && job.routeAtOpen) return executeAtOpen(job, offset)
 
         // (경로 이동을 미리 해 두는 방식 / 테스트) 단계 구성은 Flow.plan 이 정한다 (단위 테스트로 고정)
         val plan = Flow.plan(job, mode, appInFront = targetRoot(job) != null)
@@ -819,7 +741,7 @@ class MacroService : AccessibilityService() {
             LogStore.add("테스트: 기록한 경로가 없어 지금 보이는 화면에서 시도합니다")
         }
 
-        goToEventPage(job, plan, targetRoot(job)?.let { pageSignature(it).hash })?.let { return it }
+        if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps)?.let { return it }
 
         if (plan.waitForOpen) {
             val fmt = SimpleDateFormat("MM-dd HH:mm:ss", Locale.KOREA)
@@ -858,15 +780,8 @@ class MacroService : AccessibilityService() {
         var misses = 0
         var ambiguousLogged = false
         val maxAttempts = if (mode == Mode.DRY) minOf(job.maxAttempts, 15) else job.maxAttempts
-        val periodicRefresh = Flow.plan(job, mode, appInFront = true).refreshAtOpen
-        var lastRefreshAt = SystemClock.elapsedRealtime()
         for (attempt in 1..maxAttempts) {
             checkCancel()
-            // 수동 페이지: 받을 때까지 3초마다 화면을 당겨 새로고침 (정각에 아직 카드가 안 열렸을 수 있음)
-            if (periodicRefresh && SystemClock.elapsedRealtime() - lastRefreshAt >= 3_000 && !done.keys.containsAll(job.coupons)) {
-                lastRefreshAt = SystemClock.elapsedRealtime()
-                if (swipeDown()) LogStore.add("#$attempt 새로고침")
-            }
             val root = targetRoot(job)
             var foundAny = false
             if (root != null) {

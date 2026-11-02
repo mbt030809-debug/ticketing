@@ -12,18 +12,12 @@ data class FlowPlan(
     /** 앱을 첫 화면에서 새로 시작할지(경로를 따라갈 때) / 아니면 보던 화면 유지 */
     val freshStart: Boolean,
     val replayRoute: Boolean,
-    /** 경로 대신(또는 먼저) 이벤트 링크로 페이지를 바로 연다. 링크가 안 열리면 기록한 경로로 대체 */
-    val useLink: Boolean,
     /** 경로 단계마다 화면 로딩 완료를 기다릴지 (정각 이동은 속도 우선이라 안 기다림) */
     val waitLoadedBetweenSteps: Boolean,
     /** 오픈 시각까지 기다릴지 (예약 실행만) */
     val waitForOpen: Boolean,
     /** 오픈 3초 전 새로고침 (미리 이동해 두는 방식만) */
     val preRefresh: Boolean,
-    /** 사용자가 열어 둔 페이지에서 시작 (링크/경로 없음) */
-    val manualPage: Boolean,
-    /** 정각에 화면을 한 번 당겨 새로고침 + 받을 때까지 주기적으로(3초) 새로고침 (수동 페이지) */
-    val refreshAtOpen: Boolean,
     /** 쿠폰이 안 보일 때 화면을 아래로 당겨 새로고침 (예약 실행만 — 테스트 중에는 화면을 밀지 않는다) */
     val pullRefreshOnMiss: Boolean,
 )
@@ -34,18 +28,12 @@ object Flow {
     fun plan(job: Job, mode: Mode, appInFront: Boolean): FlowPlan {
         val live = mode == Mode.LIVE
         val hasRoute = job.steps.isNotEmpty()
-        val manual = job.manualPage
-        val atOpen = live && (job.routeAtOpen || manual)
+        val atOpen = live && job.routeAtOpen
         return FlowPlan(
             atOpen = atOpen,
-            // 수동 페이지: 앱이 앞에 없을 때만 (열어 둔 화면 그대로) 앞으로 가져온다
-            launch = if (manual) !appInFront else if (live) job.launchApp else (hasRoute || !appInFront),
-            // 링크로 열 때는 앱을 첫 화면으로 초기화할 필요가 없다 (미리 켜 둔 앱 위에 페이지가 열린다)
-            freshStart = !manual && hasRoute && job.eventUrl.isBlank(),
-            replayRoute = !manual && hasRoute,
-            useLink = !manual && job.eventUrl.isNotBlank(),
-            manualPage = manual,
-            refreshAtOpen = manual && live && job.refreshOnMiss,
+            launch = if (live) job.launchApp else (hasRoute || !appInFront),
+            freshStart = hasRoute,
+            replayRoute = hasRoute,
             waitLoadedBetweenSteps = !atOpen,
             waitForOpen = live,
             preRefresh = live && !atOpen && job.refreshOnMiss,

@@ -24,17 +24,6 @@ data class Step(val text: String, val optional: Boolean, val hintX: Float? = nul
     fun display(): String = (if (optional) "?" else "") + (if (isTap) "(아이콘 탭)" else text)
 }
 
-/** 이벤트 페이지 링크 처리 */
-object Links {
-    private val URL = Regex("([A-Za-z][A-Za-z0-9+.\\-]*://[^\\s\"'<>]+)")
-
-    /** 공유 문구("오늘의 특가 https://… 지금 확인")처럼 글이 섞여 있어도 첫 번째 주소만 뽑는다. 없으면 null */
-    fun extract(text: String): String? {
-        val m = URL.find(text) ?: return null
-        return m.value.trimEnd('.', ',', ')', ']', '!', '?', ';').takeIf { it.contains("://") && it.length > 8 }
-    }
-}
-
 /** 경로 기록: 눌린 요소를 이동 단계 한 줄로 만든다 (순수 함수) */
 object RouteSteps {
     /** label=글자(없으면 null), fx/fy=눌린 위치의 화면 비율(모르면 null). 둘 다 없으면 null(기록 불가) */
@@ -78,10 +67,6 @@ data class Job(
     val routeAtOpen: Boolean = true,
     /** 오픈 몇 ms 전에 앱을 실행할지 (routeAtOpen 일 때) */
     val launchLeadMs: Long = 5_000,
-    /** 이벤트 페이지 링크(딥링크). 있으면 경로 대신 이 링크로 대상 앱에서 페이지를 바로 연다 */
-    val eventUrl: String = "",
-    /** true: 사용자가 쿠폰 페이지를 직접 열어 둔다 — 링크/경로 없이 정각에 새로고침하고 바로 받는다 */
-    val manualPage: Boolean = false,
 ) {
     val hasResultTexts: Boolean
         get() = successTexts.isNotEmpty() || alreadyTexts.isNotEmpty() || soldoutTexts.isNotEmpty()
@@ -275,10 +260,6 @@ data class FormState(
     val routeAtOpen: Boolean = true,
     /** 앱 실행 시점: 오픈 몇 초 전 (0~600) */
     val launchLeadSec: String = "5",
-    /** 이벤트 페이지 링크(앱에서 공유→링크 복사). 붙여넣은 공유 문구 속 주소도 인식 */
-    val eventUrl: String = "",
-    /** 쿠폰 페이지는 내가 직접 열어 둔다 (가장 확실한 방식: 링크·경로 없이 정각에 새로고침하고 바로 받음) */
-    val manualPage: Boolean = true,
 ) {
     /**
      * openAt 이 있으면 그 날짜/시각을, 없으면 켜진 회차(slots - slotsOff) 중 다음 오픈 시각을 계산한다.
@@ -296,8 +277,6 @@ data class FormState(
         val interval = intervalMs.trim().toLongOrNull()?.takeIf { it >= 10 } ?: return Parsed(null, "간격(ms) 는 10 이상 숫자")
         val attempts = maxAttempts.trim().toIntOrNull()?.takeIf { it >= 1 } ?: return Parsed(null, "최대 시도는 1 이상 숫자")
         val waitSec = resultWaitSec.trim().toDoubleOrNull()?.takeIf { it >= 0 } ?: return Parsed(null, "결과 대기(초) 는 숫자")
-        val link = if (eventUrl.isBlank()) "" else (Links.extract(eventUrl)
-            ?: return Parsed(null, "이벤트 링크 형식 오류 — https://… 로 시작하는 주소를 붙여넣으세요"))
         val launchLead = launchLeadSec.trim().toDoubleOrNull()?.takeIf { it in 0.0..600.0 } ?: return Parsed(null, "앱 실행 시점(초)은 0~600 숫자")
         val openMs = when {
             openAt.isNotBlank() -> try {
@@ -330,8 +309,6 @@ data class FormState(
                 showDots = showDots,
                 routeAtOpen = routeAtOpen,
                 launchLeadMs = (launchLead * 1000).toLong(),
-                eventUrl = link,
-                manualPage = manualPage,
             ),
             null,
         )
