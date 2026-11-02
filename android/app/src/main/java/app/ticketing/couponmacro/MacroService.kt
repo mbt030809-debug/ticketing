@@ -26,6 +26,10 @@ import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
+import android.view.MotionEvent
+import android.widget.FrameLayout
+import kotlin.math.roundToInt
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -42,12 +46,14 @@ class MacroService : AccessibilityService() {
         @Volatile
         var instance: MacroService? = null
         private const val CHANNEL = "result"
+        private const val MAX_POS_CLICKS = 60
         private val POPUP_WORDS = listOf("닫기", "나중에", "다음에", "건너뛰기", "취소", "오늘 하루 보지 않기", "확인")
     }
 
     @Volatile private var worker: Thread? = null
     @Volatile private var cancelled = false
     @Volatile private var dots = true
+    @Volatile private var baseline: Set<String>? = null   // 위치 탭 결과 판별용: 클릭 전 화면 문구
     @Volatile private var lastToast = ""
     @Volatile private var lastToastAt = 0L
     private var overlay: View? = null
@@ -279,10 +285,14 @@ class MacroService : AccessibilityService() {
                 hidePickNow()
                 val wm = getSystemService(WINDOW_SERVICE) as WindowManager
                 val bar = LinearLayout(this).apply {
-                    orientation = LinearLayout.HORIZONTAL
+                    orientation = LinearLayout.VERTICAL
                     addView(Button(this@MacroService).apply {
-                        text = "쿠폰 목록 읽기"
+                        text = "쿠폰 목록 읽기 (글자 있는 쿠폰)"
                         setOnClickListener { Thread({ scanCoupons(job) }, "pick-scan").start() }
+                    })
+                    addView(Button(this@MacroService).apply {
+                        text = "위치로 찍기 (이미지 쿠폰)"
+                        setOnClickListener { showCapture(job) }
                     })
                     addView(Button(this@MacroService).apply {
                         text = "✕"
@@ -403,13 +413,121 @@ class MacroService : AccessibilityService() {
         }
     }
 
+    // ---- 위치로 찍기: 글자 없는(이미지) 쿠폰 카드를 화면에서 직접 터치해 지정 ----
+    @Volatile private var capturePanel: View? = null
+    private val capturePoints = ArrayList<PosTarget>()
+
+    private fun showCapture(job: Job) {
+        main.post {
+            try {
+                hidePickNow()
+                synchronized(capturePoints) { capturePoints.clear() }
+                val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                val info = TextView(this).apply {
+                    text = "받을 쿠폰 카드를 터치하세요 (0개)"
+                    textSize = 15f
+                    setTextColor(Color.WHITE)
+                    setPadding(dp(12), dp(12), dp(12), dp(12))
+                }
+                val bar = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setBackgroundColor(0xE6202020.toInt())
+                    addView(info, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(Button(this@MacroService).apply {
+                        text = "완료"
+                        setOnClickListener { finishCapture() }
+                    })
+                    addView(Button(this@MacroService).apply {
+                        text = "취소"
+                        setOnClickListener { hidePick() }
+                    })
+                }
+                val guardPx = dp(96) // 위쪽 안내 바 영역의 터치는 지정으로 보지 않음
+                val frame = FrameLayout(this).apply {
+                    setBackgroundColor(0x33000000)
+                    setOnTouchListener { _, ev ->
+                        if (ev.action == MotionEvent.ACTION_UP && ev.rawY > guardPx) {
+                            val x = ev.rawX
+                            val y = ev.rawY
+                            Thread({ onCapture(job, x, y, info) }, "capture").start()
+                        }
+                        true
+                    }
+                    addView(bar, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP))
+                }
+                val lp = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT,
+                )
+                wm.addView(frame, lp)
+                capturePanel = frame
+                LogStore.add("위치 지정: 받을 쿠폰 카드를 터치하고, 끝나면 [완료]")
+            } catch (e: Exception) {
+                LogStore.add("위치 지정 화면 표시 실패: $e")
+            }
+        }
+    }
+
+    /** 터치한 위치 바로 위의 유일한 문구를 기준점으로 삼아 '기준 문구 + 상대 위치'로 저장 */
+    private fun onCapture(job: Job, x: Float, y: Float, info: TextView) {
+        val dm = resources.displayMetrics
+        val root = targetRoot(job)
+        val anchor = root?.let { CouponMatcher.findAnchor(AxNode(it), y.toInt(), rulesFor(job), dp(320)) }
+        val fx = x / dm.widthPixels
+        val fy = y / dm.heightPixels
+        val pt = if (anchor != null) {
+            PosTarget(
+                anchor.label.trim(),
+                ((x - anchor.left) / dm.density).roundToInt(),
+                ((y - anchor.top) / dm.density).roundToInt(),
+                fx, fy,
+            )
+        } else {
+            PosTarget("", 0, 0, fx, fy)
+        }
+        val n = synchronized(capturePoints) {
+            capturePoints += pt
+            capturePoints.size
+        }
+        LogStore.add("위치 $n: ${pt.describe()}")
+        showDot(x, y, Color.GREEN)
+        main.post { info.text = "받을 쿠폰 카드를 터치하세요 (${n}개 선택됨)" }
+    }
+
+    private fun finishCapture() {
+        val entries = synchronized(capturePoints) { capturePoints.map { it.toEntry() }.distinct() }
+        hidePickNow()
+        if (entries.isEmpty()) {
+            LogStore.add("지정된 위치가 없습니다")
+            return
+        }
+        Store.setPendingCoupons(this, pickProfile, entries.joinToString("\n"), append = true)
+        LogStore.add("위치 ${entries.size}개 저장")
+        notifyResult("위치 지정 완료", "${entries.size}개 저장됨 — 탭해서 앱 열기")
+        try {
+            startActivity(
+                Intent(this, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
+            )
+        } catch (e: Exception) {
+            LogStore.add("앱 열기 실패(알림을 눌러 여세요): ${e.message}")
+        }
+    }
+
     private fun hidePickNow() {
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        for (v in listOf(pickBar, pickPanel)) {
+        for (v in listOf(pickBar, pickPanel, capturePanel)) {
             if (v != null) runCatching { wm.removeView(v) }
         }
         pickBar = null
         pickPanel = null
+        capturePanel = null
     }
 
     private fun hidePick() {
@@ -450,6 +568,7 @@ class MacroService : AccessibilityService() {
     }
 
     private fun execute(job: Job, mode: Mode): Outcome {
+        baseline = null
         var offset = 0L
         if (mode == Mode.LIVE) {
             val o = Ntp.offsetMs()
@@ -491,6 +610,11 @@ class MacroService : AccessibilityService() {
                     LogStore.add("오픈 직전 새로고침")
                 }
             }
+            // 위치(이미지) 쿠폰은 결과를 '클릭 전엔 없던 새 문구'로 판별하므로, 오픈 1.5초 전 화면을 기준으로 저장
+            if (job.coupons.any { PosTarget.isPos(it) } && fireAt - (System.currentTimeMillis() + offset) > 2500) {
+                waitUntil(fireAt - 1500, offset)
+                targetRoot(job)?.let { baseline = snapshotTexts(it) }
+            }
             waitUntil(fireAt, offset)
         }
         return clickLoop(job, mode)
@@ -504,6 +628,7 @@ class MacroService : AccessibilityService() {
         val rules = rulesFor(job)
         val done = LinkedHashMap<String, String>()   // 쿠폰 문구 -> success|already|soldout|clicked|dry_run
         val clicked = HashSet<String>()
+        val posStates = HashMap<String, PosState>()
         var misses = 0
         var ambiguousLogged = false
         val maxAttempts = if (mode == Mode.DRY) minOf(job.maxAttempts, 15) else job.maxAttempts
@@ -514,6 +639,13 @@ class MacroService : AccessibilityService() {
             if (root != null) {
                 for (entry in job.coupons) {
                     if (entry in done) continue
+                    val pos = PosTarget.parse(entry)
+                    if (pos != null) {
+                        if (handlePos(job, mode, rules, root, attempt, entry, pos, posStates.getOrPut(entry) { PosState() }, done)) {
+                            foundAny = true
+                        }
+                        continue
+                    }
                     val m = CouponMatcher.resolve(entry, { t -> findNodes(root, t) }, rules) ?: continue
                     foundAny = true
                     when {
@@ -567,13 +699,104 @@ class MacroService : AccessibilityService() {
         }
         val missing = job.coupons.filter { it !in done }
         val partial = if (done.isEmpty()) "" else summarize(job, done, maxAttempts).detail + " · "
-        return Outcome("timeout", maxAttempts, partial + "못 찾음/미완료: " + missing.joinToString(", "))
+        return Outcome("timeout", maxAttempts, partial + "못 찾음/미완료: " + missing.joinToString(", ") { shown(it) })
+    }
+
+    private class PosState {
+        var clicks = 0
+        var lastAt = 0L
+    }
+
+    private fun shown(entry: String): String =
+        PosTarget.parse(entry)?.let { "위치(${it.anchor.ifEmpty { "화면 비율" }})" } ?: entry
+
+    /**
+     * 위치로 지정한 쿠폰(글자 없는 카드) 한 번 처리. 화면에서 대상을 찾았으면 true.
+     * 결과(성공/이미/소진)는 토스트 또는 클릭 전 화면에 없던 새 문구로 판별한다.
+     */
+    private fun handlePos(
+        job: Job, mode: Mode, rules: CouponRules, root: AccessibilityNodeInfo, attempt: Int,
+        entry: String, pos: PosTarget, st: PosState, done: MutableMap<String, String>,
+    ): Boolean {
+        if (st.clicks > 0) {
+            val r = posResult(job, rules, st.lastAt, deep = st.clicks % 3 == 0)
+            if (r != null) {
+                done[entry] = r
+                LogStore.add("[${shown(entry)}] → ${label(r)}")
+                return true
+            }
+            if (st.clicks >= MAX_POS_CLICKS) {
+                done[entry] = "clicked"
+                LogStore.add("[${shown(entry)}] ${MAX_POS_CLICKS}회 탭했지만 결과 문구를 확인하지 못해 중단")
+                return true
+            }
+        }
+        val pt = resolvePos(root, pos) ?: return false
+        if (mode == Mode.DRY) {
+            done[entry] = "dry_run"
+            showDot(pt.first, pt.second, Color.GREEN)
+            LogStore.add("[${shown(entry)}] ${pos.describe()} → (${pt.first.toInt()}, ${pt.second.toInt()}) 탭 예정, 클릭 생략 (초록 점 위치 확인)")
+            return true
+        }
+        if (baseline == null) baseline = snapshotTexts(root)
+        val ok = gesture(pt.first, pt.second, pt.first, pt.second, 40)
+        if (ok) {
+            st.clicks++
+            st.lastAt = SystemClock.elapsedRealtime()
+            showDot(pt.first, pt.second, Color.RED)
+            LogStore.add("#$attempt [${shown(entry)}] 탭 ${st.clicks}회 (${pt.first.toInt()}, ${pt.second.toInt()})")
+            if (!job.hasResultTexts) done[entry] = "clicked"
+        } else {
+            LogStore.add("#$attempt [${shown(entry)}] 탭 실패")
+        }
+        return true
+    }
+
+    /** 기준 문구 + 상대 위치(dp) -> 화면 좌표. 기준 문구가 지정됐는데 안 보이면 null(아직 못 찾음). */
+    private fun resolvePos(root: AccessibilityNodeInfo, p: PosTarget): Pair<Float, Float>? {
+        val dm = resources.displayMetrics
+        val pt: Pair<Float, Float> = if (p.anchor.isNotEmpty()) {
+            val a = root.findAccessibilityNodeInfosByText(p.anchor).firstOrNull { it.isVisibleToUser } ?: return null
+            val r = Rect()
+            a.getBoundsInScreen(r)
+            (r.left + p.dxDp * dm.density) to (r.top + p.dyDp * dm.density)
+        } else {
+            (p.fx * dm.widthPixels) to (p.fy * dm.heightPixels)
+        }
+        if (pt.first < 0 || pt.second < 0 || pt.first > dm.widthPixels || pt.second > dm.heightPixels) return null
+        return pt
+    }
+
+    private fun posResult(job: Job, rules: CouponRules, clickedAt: Long, deep: Boolean): String? {
+        val toast = if (lastToastAt >= clickedAt) lastToast else ""
+        if (toast.isNotEmpty()) CouponMatcher.classify(toast, rules, 80)?.let { return it }
+        if (!deep) return null
+        val base = baseline ?: return null
+        val root = targetRoot(job) ?: return null
+        for (t in snapshotTexts(root)) {
+            if (t !in base) CouponMatcher.classify(t, rules)?.let { return it }
+        }
+        return null
+    }
+
+    /** 화면에 보이는 모든 문구(text/contentDescription). 클릭 전후 비교용. */
+    private fun snapshotTexts(root: AccessibilityNodeInfo): Set<String> {
+        val out = HashSet<String>()
+        var seen = 0
+        fun walk(n: AccessibilityNodeInfo) {
+            if (seen++ >= 1500) return
+            n.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let { out += it }
+            n.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let { out += it }
+            for (i in 0 until n.childCount) n.getChild(i)?.let { walk(it) }
+        }
+        walk(root)
+        return out
     }
 
     private fun summarize(job: Job, done: Map<String, String>, attempts: Int): Outcome {
         val parts = listOf("success", "already", "soldout", "clicked", "dry_run").mapNotNull { st ->
             val names = job.coupons.filter { done[it] == st }
-            if (names.isEmpty()) null else "${label(st)}: ${names.joinToString(", ")}"
+            if (names.isEmpty()) null else "${label(st)}: ${names.joinToString(", ") { shown(it) }}"
         }
         val values = done.values.toSet()
         val overall = when {
@@ -616,8 +839,17 @@ class MacroService : AccessibilityService() {
         root.findAccessibilityNodeInfosByText(text).map { AxNode(it) }
 
     // ---- 화면 조작 ----
-    private fun targetRoot(job: Job): AccessibilityNodeInfo? =
-        rootInActiveWindow?.takeIf { it.packageName?.toString() == job.pkg }
+    private fun targetRoot(job: Job): AccessibilityNodeInfo? {
+        val active = rootInActiveWindow
+        if (active != null && active.packageName?.toString() == job.pkg) return active
+        // 오버레이 등으로 활성 창이 바뀐 경우: 가장 위의 앱 창이 대상 앱이면 그 창을 읽는다
+        return try {
+            windows.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+                ?.root?.takeIf { it.packageName?.toString() == job.pkg }
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     private fun find(root: AccessibilityNodeInfo, texts: List<String>): AccessibilityNodeInfo? {
         for (t in texts) {

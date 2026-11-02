@@ -44,17 +44,25 @@ object Store {
         prefs(ctx, "app").edit().putString("pending_steps_$profileId", steps).commit()
     }
 
-    /** 화면에서 고른 쿠폰 목록도 같은 방식으로 전달 */
-    fun setPendingCoupons(ctx: Context, profileId: String, coupons: String) {
-        prefs(ctx, "app").edit().putString("pending_coupons_$profileId", coupons).commit()
+    /**
+     * 화면에서 고른 쿠폰 목록도 같은 방식으로 전달.
+     * append=true 면 기존 목록에 덧붙이고(위치 지정), false 면 교체한다(문구 목록 고르기).
+     */
+    fun setPendingCoupons(ctx: Context, profileId: String, coupons: String, append: Boolean = false) {
+        prefs(ctx, "app").edit()
+            .putString("pending_coupons_$profileId", coupons)
+            .putBoolean("pending_coupons_append_$profileId", append)
+            .commit()
     }
 
-    fun takePendingCoupons(ctx: Context, profileId: String): String? {
+    /** (쿠폰 문자열, 덧붙이기 여부) */
+    fun takePendingCoupons(ctx: Context, profileId: String): Pair<String, Boolean>? {
         val p = prefs(ctx, "app")
         val key = "pending_coupons_$profileId"
         val v = p.getString(key, null) ?: return null
-        p.edit().remove(key).commit()
-        return v
+        val append = p.getBoolean("pending_coupons_append_$profileId", false)
+        p.edit().remove(key).remove("pending_coupons_append_$profileId").commit()
+        return v to append
     }
 
     fun takePendingSteps(ctx: Context, profileId: String): String? {

@@ -147,6 +147,45 @@ object CouponMatcher {
         return CardMatch(entry, button, state, ambiguous, info.text)
     }
 
+    // ---- 위치로 지정하기 (글자 없는 쿠폰 카드) ----
+
+    /** 새로 나타난 문구(토스트/팝업)가 성공·이미·소진 중 무엇인지. 버튼보다 긴 문구도 허용. */
+    fun classify(label: String, r: CouponRules, maxLen: Int = 40): String? {
+        if (label.length > maxLen) return null
+        return when {
+            has(label, r.successTexts) -> "success"
+            has(label, r.alreadyTexts) -> "already"
+            has(label, r.soldoutTexts) -> "soldout"
+            else -> null
+        }
+    }
+
+    /**
+     * 눌린 위치(tapY) 바로 위에 있는 '유일한' 문구 노드 = 위치 지정의 기준점(앵커).
+     * 화면에 같은 문구가 여러 개면(예: 카드마다 "3만원 구매시") 구분이 안 되므로 제외하고,
+     * 버튼/상태 문구도 제외한다 (오픈 시 문구가 바뀔 수 있음).
+     */
+    fun findAnchor(root: UiNode, tapY: Int, r: CouponRules, maxGapPx: Int): UiNode? {
+        val counts = HashMap<String, Int>()
+        val candidates = ArrayList<UiNode>()
+        var seen = 0
+        fun walk(n: UiNode) {
+            if (seen++ >= MAX_SCAN_NODES) return
+            val l = n.label.trim()
+            if (l.isNotEmpty()) {
+                counts[l] = (counts[l] ?: 0) + 1
+                if (l.length <= 40 && n.visible && n.bottom <= tapY + 8 && tapY - n.bottom <= maxGapPx &&
+                    !isButton(l, r) && stateOf(l, r) == null
+                ) {
+                    candidates += n
+                }
+            }
+            for (c in n.children) walk(c)
+        }
+        walk(root)
+        return candidates.filter { counts[it.label.trim()] == 1 }.maxByOrNull { it.bottom }
+    }
+
     // ---- 화면에서 쿠폰 고르기 (목록 만들기) ----
 
     /** 화면 전체에서 지금 누를 수 있는 받기 버튼들 */

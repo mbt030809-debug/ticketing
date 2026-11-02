@@ -163,6 +163,36 @@ class CouponMatcherTest {
     }
 
     @Test
+    fun anchorIsNearestUniqueTextAboveTapAndSkipsDuplicatesAndStates() {
+        // 이미지 카드 화면: 제목("오후 5시 오픈") 아래에 카드 2장. 카드마다 같은 문구가 반복됨
+        val heading = FakeNode("오후 5시 오픈", 10, 900, 300, 930)
+        val dup1 = FakeNode("3만원 구매시", 20, 1000, 200, 1020)
+        val dup2 = FakeNode("3만원 구매시", 220, 1000, 400, 1020)
+        val state = FakeNode("마감", 20, 1030, 200, 1050)       // 상태 문구는 앵커 제외
+        val root = FakeNode("", 0, 0, 420, 2000).add(heading, dup1, dup2, state)
+        val anchor = CouponMatcher.findAnchor(root, 1070, rules, 400)
+        assertSame(heading, anchor)
+    }
+
+    @Test
+    fun anchorIsNullWhenNothingUniqueIsCloseAbove() {
+        val far = FakeNode("오후 5시 오픈", 10, 100, 300, 130)
+        val root = FakeNode("", 0, 0, 420, 2000).add(far)
+        assertNull(CouponMatcher.findAnchor(root, 1070, rules, 400))   // 간격 940px > 400px
+        assertNull(CouponMatcher.findAnchor(FakeNode("", 0, 0, 10, 10), 500, rules, 400))
+    }
+
+    @Test
+    fun classifyNewTextsAsResults() {
+        assertEquals("success", CouponMatcher.classify("쿠폰이 발급되었습니다", rules))
+        assertEquals("already", CouponMatcher.classify("이미 받은 쿠폰입니다", rules))
+        assertEquals("soldout", CouponMatcher.classify("선착순 마감되었습니다", rules))
+        assertNull(CouponMatcher.classify("곧 오픈 예정", rules))
+        // 긴 안내문은 결과로 보지 않음 (유의사항에 "발급" 이 들어 있어도 오탐하지 않도록)
+        assertNull(CouponMatcher.classify("쿠폰 발급일 당일 기준 익일 06:59:59까지 사용 가능하며 익일 07:00:00 이후 소멸", rules))
+    }
+
+    @Test
     fun termsSplitOnPlus() {
         assertEquals(listOf("5,000원", "3만원 이상"), CouponMatcher.terms(" 5,000원 + 3만원 이상 "))
         assertTrue(CouponMatcher.terms("  ").isEmpty())

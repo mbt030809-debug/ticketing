@@ -117,9 +117,11 @@ class MainActivity : Activity() {
         root.addView(row(button("화면에서 고르기") { startPick() }, button("목록 지우기") { clearCoupons() }))
         root.addView(
             note(
-                "[화면에서 고르기]: 대상 앱이 열리고(기록한 경로로 이동), 쿠폰 페이지에서 화면 위 [쿠폰 목록 읽기]를 누르면 " +
-                    "보이는 쿠폰이 목록으로 나옵니다. 받을 것만 체크하세요. 직접 적을 땐 쿠폰 카드에 적힌 문구(예: 5,000원 할인)를 한 줄에 하나씩, " +
-                    "비슷한 쿠폰이 있으면 +로 이으세요 (예: 5,000원+3만원 이상). 체크한 쿠폰의 버튼만 누릅니다.",
+                "[화면에서 고르기]: 대상 앱이 열리고(기록한 경로로 이동), 쿠폰 페이지에서 화면 위 버튼을 누르세요.\n" +
+                    "· [쿠폰 목록 읽기] — 글자가 있는 쿠폰: 목록에서 받을 것만 체크\n" +
+                    "· [위치로 찍기] — 글자 없는 이미지 쿠폰(카드 전체가 그림): 받을 카드를 직접 터치. 페이지를 스크롤하지 않은 첫 화면에서 보이는 카드만 지정하세요.\n" +
+                    "직접 적을 땐 카드에 적힌 문구(예: 5,000원 할인)를 한 줄에 하나씩, 비슷한 쿠폰은 +로 이으세요 (예: 5,000원+3만원 이상). " +
+                    "[테스트하기 → 찾기만]을 하면 누를 위치에 초록 점이 뜹니다.",
             ),
         )
 
@@ -212,10 +214,11 @@ class MainActivity : Activity() {
             saveCurrent()
             toast("경로 ${Parse.steps(steps).size}단계 저장됨")
         }
-        Store.takePendingCoupons(this, profile.id)?.let { c ->
-            fields.getValue(K_COUPONS).setText(c)
+        Store.takePendingCoupons(this, profile.id)?.let { (c, append) ->
+            val merged = if (append) (Parse.coupons(f(K_COUPONS)) + Parse.coupons(c)).distinct().joinToString("\n") else c
+            fields.getValue(K_COUPONS).setText(merged)
             saveCurrent()
-            toast("쿠폰 ${Parse.coupons(c).size}개 저장됨")
+            toast("쿠폰 ${Parse.coupons(c).size}개 ${if (append) "추가" else "저장"}됨")
         }
         refreshStatus()
         LogStore.listener = { runOnUiThread { logView.text = LogStore.text(); refreshStatus() } }
@@ -346,8 +349,13 @@ class MainActivity : Activity() {
     }
 
     private fun refreshCouponNote() {
-        val n = Parse.coupons(f(K_COUPONS)).size
-        couponNote.text = if (n == 0) "⚠ 받을 쿠폰이 정해지지 않았습니다. 정하지 않으면 시작할 수 없어요." else "받을 쿠폰 ${n}개: 체크한 쿠폰의 버튼만 누릅니다."
+        val list = Parse.coupons(f(K_COUPONS))
+        val pos = list.count { PosTarget.isPos(it) }
+        couponNote.text = if (list.isEmpty()) {
+            "⚠ 받을 쿠폰이 정해지지 않았습니다. 정하지 않으면 시작할 수 없어요."
+        } else {
+            "받을 쿠폰 ${list.size}개 (문구 ${list.size - pos}, 위치 $pos): 정한 쿠폰만 누릅니다."
+        }
     }
 
     // ---- 쿠폰 페이지 가는 길 ----
