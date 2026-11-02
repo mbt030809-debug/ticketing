@@ -32,13 +32,13 @@ class JobTest {
     fun toJobRequiresPackageAndTarget() {
         assertNotNull(FormState(pkg = "", targets = "x").toJob(false).error)
         assertNotNull(FormState(pkg = "a.b", targets = "").toJob(false).error)
-        assertNull(FormState(pkg = "a.b", targets = "x").toJob(false).error)
+        assertNull(FormState(pkg = "a.b", targets = "x", coupons = "c").toJob(false).error)
     }
 
     @Test
     fun toJobOpenAtRequiredOnlyForLive() {
         // openAt(날짜 지정)이 비어 있고 회차(slots)도 없으면 LIVE 는 오픈 시각을 알 수 없어 오류
-        val f = FormState(pkg = "a.b", targets = "x", openAt = "", slots = "")
+        val f = FormState(pkg = "a.b", targets = "x", coupons = "c", openAt = "", slots = "")
         assertNull(f.toJob(requireOpenAt = false).error)
         assertNotNull(f.toJob(requireOpenAt = true).error)
         assertNotNull(f.copy(openAt = "내일 10시").toJob(true).error)
@@ -48,7 +48,7 @@ class JobTest {
 
     @Test
     fun toJobRejectsBadNumbers() {
-        val base = FormState(pkg = "a.b", targets = "x")
+        val base = FormState(pkg = "a.b", targets = "x", coupons = "c")
         assertNotNull(base.copy(intervalMs = "5").toJob(false).error)
         assertNotNull(base.copy(maxAttempts = "0").toJob(false).error)
         assertNotNull(base.copy(leadMs = "abc").toJob(false).error)
@@ -56,10 +56,28 @@ class JobTest {
 
     @Test
     fun hasResultTexts() {
-        val none = FormState(pkg = "a.b", targets = "x").toJob(false).job!!
+        val none = FormState(pkg = "a.b", targets = "x", coupons = "c").toJob(false).job!!
         assertFalse(none.hasResultTexts)
-        val some = FormState(pkg = "a.b", targets = "x", success = "발급").toJob(false).job!!
+        val some = FormState(pkg = "a.b", targets = "x", coupons = "c", success = "발급").toJob(false).job!!
         assertTrue(some.hasResultTexts)
+    }
+
+    @Test
+    fun couponsParsedPerLineAndKeepCommasInAmounts() {
+        assertEquals(listOf("5,000원 할인", "10% 할인", "와우+무료배송"), Parse.coupons("5,000원 할인\n10% 할인; 와우+무료배송\n\n"))
+        assertTrue(Parse.coupons("  \n ; ").isEmpty())
+    }
+
+    @Test
+    fun couponsAreRequiredToStart() {
+        val noCoupon = FormState(pkg = "a.b", targets = "x")
+        val e = noCoupon.toJob(false).error
+        assertNotNull(e)
+        assertTrue(e!!.contains("쿠폰"))
+        // 쿠폰 고르기(목록 읽기)용으로는 쿠폰 없이도 Job 생성 가능
+        assertNull(noCoupon.toJob(requireOpenAt = false, requireCoupons = false).error)
+        val ok = noCoupon.copy(coupons = "5,000원\n10% 할인").toJob(false).job!!
+        assertEquals(listOf("5,000원", "10% 할인"), ok.coupons)
     }
 
     @Test

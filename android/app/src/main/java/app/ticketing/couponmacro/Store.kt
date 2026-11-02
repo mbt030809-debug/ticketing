@@ -28,6 +28,7 @@ object Store {
             .putString("steps", f.steps)
             .putString("popups", f.popups)
             .putString("targets", f.targets)
+            .putString("coupons", f.coupons)
             .putString("success", f.success)
             .putString("already", f.already)
             .putString("soldout", f.soldout)
@@ -40,6 +41,19 @@ object Store {
     /** 서비스가 기록한 이동 경로를 앱 화면이 다음에 열릴 때 가져가도록 임시 보관 */
     fun setPendingSteps(ctx: Context, profileId: String, steps: String) {
         prefs(ctx, "app").edit().putString("pending_steps_$profileId", steps).commit()
+    }
+
+    /** 화면에서 고른 쿠폰 목록도 같은 방식으로 전달 */
+    fun setPendingCoupons(ctx: Context, profileId: String, coupons: String) {
+        prefs(ctx, "app").edit().putString("pending_coupons_$profileId", coupons).commit()
+    }
+
+    fun takePendingCoupons(ctx: Context, profileId: String): String? {
+        val p = prefs(ctx, "app")
+        val key = "pending_coupons_$profileId"
+        val v = p.getString(key, null) ?: return null
+        p.edit().remove(key).commit()
+        return v
     }
 
     fun takePendingSteps(ctx: Context, profileId: String): String? {
@@ -77,6 +91,7 @@ object Store {
             steps = p.getString("steps", d.steps).orEmpty(),
             popups = p.getString("popups", d.popups).orEmpty(),
             targets = p.getString("targets", d.targets).orEmpty(),
+            coupons = p.getString("coupons", d.coupons).orEmpty(),
             success = p.getString("success", d.success).orEmpty(),
             already = p.getString("already", d.already).orEmpty(),
             soldout = p.getString("soldout", d.soldout).orEmpty(),

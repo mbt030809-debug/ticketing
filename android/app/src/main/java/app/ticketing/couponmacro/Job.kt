@@ -23,6 +23,8 @@ data class Job(
     val steps: List<Step>,
     val popups: List<String>,
     val targets: List<String>,
+    /** 받을 쿠폰 문구들 (카드 안에 적힌 문구, +로 이으면 모두 포함). 이 카드의 버튼만 누른다 */
+    val coupons: List<String>,
     val successTexts: List<String>,
     val alreadyTexts: List<String>,
     val soldoutTexts: List<String>,
@@ -39,6 +41,10 @@ object Parse {
     /** 쉼표/줄바꿈으로 구분된 문자열 목록 */
     fun list(s: String): List<String> =
         s.split(',', '\n').map { it.trim() }.filter { it.isNotEmpty() }
+
+    /** 받을 쿠폰: 한 줄(또는 ;)에 하나. 금액의 쉼표(5,000원)가 있어 쉼표로는 나누지 않는다. */
+    fun coupons(s: String): List<String> =
+        s.split('\n', ';').map { it.trim() }.filter { it.isNotEmpty() }
 
     /** 한 줄에 하나. 앞에 ? 를 붙이면 optional(못 찾아도 계속). */
     fun steps(s: String): List<Step> =
@@ -138,6 +144,8 @@ data class FormState(
     val steps: String = "",
     val popups: String = "닫기, 나중에",
     val targets: String = "",
+    /** 받을 쿠폰(필수): 한 줄에 하나 */
+    val coupons: String = "",
     val success: String = "",
     val already: String = "",
     val soldout: String = "",
@@ -151,9 +159,13 @@ data class FormState(
      * openAt 이 있으면 그 날짜/시각을, 없으면 slots/slot 에서 다음 오픈 시각을 계산한다.
      * (UI 는 회차 방식만 사용하고 openAt 은 비워 둔다)
      */
-    fun toJob(requireOpenAt: Boolean, nowMs: Long = System.currentTimeMillis()): Parsed {
+    fun toJob(requireOpenAt: Boolean, nowMs: Long = System.currentTimeMillis(), requireCoupons: Boolean = true): Parsed {
         if (pkg.isBlank()) return Parsed(null, "패키지명이 비어있음 ([앱 선택] 사용)")
         val targetList = Parse.list(targets)
+        val couponList = Parse.coupons(coupons)
+        if (requireCoupons && couponList.isEmpty()) {
+            return Parsed(null, "받을 쿠폰을 정하세요 (쿠폰 카드에 적힌 문구, 예: 5,000원)")
+        }
         if (targetList.isEmpty()) return Parsed(null, "받기 버튼 문구가 비어있음")
         val lead = leadMs.trim().toLongOrNull() ?: return Parsed(null, "lead(ms) 는 숫자")
         val interval = intervalMs.trim().toLongOrNull()?.takeIf { it >= 10 } ?: return Parsed(null, "간격(ms) 는 10 이상 숫자")
@@ -182,6 +194,7 @@ data class FormState(
                 steps = Parse.steps(steps),
                 popups = Parse.list(popups),
                 targets = targetList,
+                coupons = couponList,
                 successTexts = Parse.list(success),
                 alreadyTexts = Parse.list(already),
                 soldoutTexts = Parse.list(soldout),
@@ -201,10 +214,10 @@ data class Profile(val id: String, val label: String, val defaults: FormState, v
 /** 시작용 기본값. 문구는 예시이므로 [화면 요소 보기]로 실제 문구 확인 후 고급 설정에서 수정할 것. */
 object Presets {
     private val COMMON = FormState(
-        targets = "쿠폰 받기, 쿠폰받기, 쿠폰 다운로드",
-        success = "발급, 받기 완료, 다운로드 완료",
+        targets = "쿠폰 받기, 쿠폰받기, 받기, 다운로드, 다운받기",
+        success = "발급, 받기 완료, 다운로드 완료, 다운 완료",
         already = "이미 받, 이미 발급",
-        soldout = "소진, 마감",
+        soldout = "소진, 마감, 품절, 종료",
     )
     val COUPANG = Profile(
         id = "coupang",

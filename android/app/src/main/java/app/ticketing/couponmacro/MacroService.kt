@@ -7,10 +7,15 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.widget.Button
+import android.widget.CheckBox
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -59,6 +64,7 @@ class MacroService : AccessibilityService() {
             recordPkg = null
             hideRecordOverlay()
         }
+        hidePick()
         instance = null
         return super.onUnbind(intent)
     }
@@ -105,6 +111,7 @@ class MacroService : AccessibilityService() {
     fun cancel() {
         cancelled = true
         worker?.interrupt()
+        hidePick()
     }
 
     // ---- 경로 기록: 사용자가 직접 눌러 이동하는 순서를 '이동 단계'로 저장 ----
@@ -219,6 +226,193 @@ class MacroService : AccessibilityService() {
         }
     }
 
+    // ---- 화면에서 쿠폰 고르기: 지금 보이는 쿠폰 카드를 목록으로 보여주고 받을 것만 체크 ----
+    @Volatile private var pickBar: View? = null
+    @Volatile private var pickPanel: View? = null
+    @Volatile private var pickProfile = ""
+
+    /** 대상 앱을 열고(기록된 경로가 있으면 따라 이동) 화면 위에 [쿠폰 목록 읽기] 버튼을 띄운다. */
+    fun startPicking(job: Job, profileId: String): Boolean {
+        if (isRunning() || isRecording()) return false
+        pickProfile = profileId
+        cancelled = false
+        worker = Thread({ runPick(job) }, "pick").also { it.start() }
+        return true
+    }
+
+    private fun runPick(job: Job) {
+        try {
+            if (job.launchApp) {
+                if (!launch(job.pkg)) {
+                    LogStore.add("앱 실행 실패: ${job.pkg}")
+                    return
+                }
+                LogStore.add("쿠폰 고르기: 앱 실행")
+                sleep(2000)
+            }
+            for ((i, s) in job.steps.withIndex()) {
+                val ok = waitAndClick(job, s.text, 10_000)
+                LogStore.add("이동 ${i + 1}/${job.steps.size} '${s.text}' ${if (ok) "OK" else "못 찾음"}")
+                if (!ok && !s.optional) {
+                    LogStore.add("이동 단계 실패 — 직접 쿠폰 페이지로 이동한 뒤 [쿠폰 목록 읽기]를 누르세요")
+                    break
+                }
+                sleep(600)
+            }
+            showPickBar(job)
+            LogStore.add("쿠폰 페이지가 보이면 화면 위 [쿠폰 목록 읽기]를 누르세요")
+        } catch (e: InterruptedException) {
+            LogStore.add("취소됨")
+        } catch (e: Exception) {
+            LogStore.add("오류: $e")
+        }
+    }
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun showPickBar(job: Job) {
+        main.post {
+            try {
+                hidePickNow()
+                val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                val bar = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(Button(this@MacroService).apply {
+                        text = "쿠폰 목록 읽기"
+                        setOnClickListener { Thread({ scanCoupons(job) }, "pick-scan").start() }
+                    })
+                    addView(Button(this@MacroService).apply {
+                        text = "✕"
+                        setOnClickListener { hidePick() }
+                    })
+                }
+                val lp = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                    PixelFormat.TRANSLUCENT,
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.END
+                    y = dp(96)
+                }
+                wm.addView(bar, lp)
+                pickBar = bar
+            } catch (e: Exception) {
+                LogStore.add("버튼 표시 실패: $e")
+            }
+        }
+    }
+
+    private fun scanCoupons(job: Job) {
+        val root = targetRoot(job)
+        if (root == null) {
+            LogStore.add("대상 앱 화면이 아닙니다 — 쿠폰 페이지를 연 뒤 다시 누르세요")
+            return
+        }
+        val rules = rulesFor(job)
+        val buttons = CouponMatcher.findButtons(AxNode(root), rules)
+        val items = CouponMatcher.listCards(buttons, rules)
+        LogStore.add("받기 버튼 ${buttons.size}개 · 쿠폰 후보 ${items.size}개")
+        main.post {
+            if (items.isEmpty()) {
+                notifyResult("쿠폰 목록", "받기 버튼을 찾지 못했습니다. 쿠폰 페이지인지, 고급 설정의 '받기 버튼 문구'를 확인하세요")
+            } else {
+                showPickPanel(items)
+            }
+        }
+    }
+
+    private fun showPickPanel(items: List<PickItem>) {
+        try {
+            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+            val dm = resources.displayMetrics
+            val pad = dp(12)
+            val checks = items.map { item ->
+                CheckBox(this).apply {
+                    text = item.lines.joinToString("\n") + "\n→ 저장 문구: ${item.keyword}"
+                    textSize = 14f
+                    setTextColor(Color.WHITE)
+                    setPadding(0, dp(6), 0, dp(6))
+                }
+            }
+            val list = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                checks.forEach { addView(it) }
+            }
+            val panel = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setBackgroundColor(0xF2202020.toInt())
+                setPadding(pad, pad, pad, pad)
+                addView(TextView(this@MacroService).apply {
+                    text = "받을 쿠폰을 고르세요 (체크한 것만 받습니다)"
+                    textSize = 16f
+                    setTextColor(Color.WHITE)
+                })
+                addView(
+                    ScrollView(this@MacroService).apply { addView(list) },
+                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, (dm.heightPixels * 0.4).toInt()),
+                )
+                addView(LinearLayout(this@MacroService).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(Button(this@MacroService).apply {
+                        text = "선택 완료"
+                        setOnClickListener { finishPick(items, checks) }
+                    }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(Button(this@MacroService).apply {
+                        text = "취소"
+                        setOnClickListener { hidePick() }
+                    }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                })
+            }
+            val lp = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT,
+            ).apply { gravity = Gravity.BOTTOM }
+            pickPanel?.let { runCatching { wm.removeView(it) } }
+            wm.addView(panel, lp)
+            pickPanel = panel
+        } catch (e: Exception) {
+            LogStore.add("목록 표시 실패: $e")
+        }
+    }
+
+    private fun finishPick(items: List<PickItem>, checks: List<CheckBox>) {
+        val chosen = items.indices.filter { checks[it].isChecked }.map { items[it].keyword }.distinct()
+        hidePickNow()
+        if (chosen.isEmpty()) {
+            LogStore.add("선택된 쿠폰이 없습니다")
+            return
+        }
+        Store.setPendingCoupons(this, pickProfile, chosen.joinToString("\n"))
+        LogStore.add("쿠폰 ${chosen.size}개 선택: ${chosen.joinToString(" | ")}")
+        notifyResult("쿠폰 선택 완료", "${chosen.size}개 저장됨 — 탭해서 앱 열기")
+        try {
+            startActivity(
+                Intent(this, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
+            )
+        } catch (e: Exception) {
+            LogStore.add("앱 열기 실패(알림을 눌러 여세요): ${e.message}")
+        }
+    }
+
+    private fun hidePickNow() {
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        for (v in listOf(pickBar, pickPanel)) {
+            if (v != null) runCatching { wm.removeView(v) }
+        }
+        pickBar = null
+        pickPanel = null
+    }
+
+    private fun hidePick() {
+        main.post { hidePickNow() }
+    }
+
     /** delayMs 뒤 현재 전면 화면의 요소(text/desc/id)를 로그로 덤프. 그 사이 대상 앱으로 전환해 둘 것. */
     fun dumpAfter(delayMs: Long) {
         LogStore.add("${delayMs / 1000}초 뒤 현재 화면 덤프 — 대상 앱 화면으로 전환하세요")
@@ -298,60 +492,123 @@ class MacroService : AccessibilityService() {
         return clickLoop(job, mode)
     }
 
+    /**
+     * 지정한 쿠폰(job.coupons)마다 '그 쿠폰 카드 안의 받기 버튼'만 누른다.
+     * 모든 쿠폰이 성공/이미 받음/소진 중 하나로 정리되면 종료.
+     */
     private fun clickLoop(job: Job, mode: Mode): Outcome {
+        val rules = rulesFor(job)
+        val done = LinkedHashMap<String, String>()   // 쿠폰 문구 -> success|already|soldout|clicked|dry_run
+        val clicked = HashSet<String>()
         var misses = 0
-        for (attempt in 1..job.maxAttempts) {
+        var ambiguousLogged = false
+        val maxAttempts = if (mode == Mode.DRY) minOf(job.maxAttempts, 15) else job.maxAttempts
+        for (attempt in 1..maxAttempts) {
             checkCancel()
             val root = targetRoot(job)
-            val node = if (root != null) find(root, job.targets) else null
-            if (node != null) {
-                if (mode == Mode.DRY) return Outcome("dry_run", attempt, "타겟 발견, 클릭 생략: ${describe(node)}")
-                val t0 = SystemClock.elapsedRealtime()
-                val ok = clickNode(node)
-                LogStore.add("#$attempt 클릭 ${if (ok) "OK" else "실패"}: ${describe(node)}")
-                if (ok) {
-                    if (!job.hasResultTexts) return Outcome("clicked", attempt, "결과 문구 미설정 — 클릭만 수행")
-                    val r = detect(job, t0)
-                    if (r != null) return Outcome(r.first, attempt, r.second)
-                    LogStore.add("#$attempt 결과 문구 미확인 → 재시도")
-                    if (root != null) dismissPopups(job, root)
+            var foundAny = false
+            if (root != null) {
+                for (entry in job.coupons) {
+                    if (entry in done) continue
+                    val m = CouponMatcher.resolve(entry, { t -> findNodes(root, t) }, rules) ?: continue
+                    foundAny = true
+                    when {
+                        m.button != null -> {
+                            if (mode == Mode.DRY) {
+                                done[entry] = "dry_run"
+                                LogStore.add("[$entry] 카드 발견 → 받기 버튼 확인, 클릭 생략 (카드: ${m.text.take(60)})")
+                            } else {
+                                val t0 = SystemClock.elapsedRealtime()
+                                val ok = clickNode((m.button as AxNode).raw)
+                                LogStore.add("#$attempt [$entry] 클릭 ${if (ok) "OK" else "실패"}")
+                                if (ok) {
+                                    clicked += entry
+                                    val st = if (!job.hasResultTexts) "clicked" else detectFor(job, entry, t0, rules)
+                                    if (st != null) {
+                                        done[entry] = st
+                                        LogStore.add("[$entry] → ${label(st)}")
+                                    } else {
+                                        LogStore.add("#$attempt [$entry] 결과 문구 미확인 → 재시도")
+                                    }
+                                }
+                            }
+                        }
+                        m.state != null -> {
+                            // 클릭 전부터 '받기 완료'로 보이면 이미 받은 쿠폰
+                            val st = if (m.state == "success" && entry !in clicked) "already" else m.state
+                            done[entry] = st
+                            LogStore.add("[$entry] 버튼 없음, 카드 상태: ${label(st)}")
+                        }
+                        m.ambiguous && !ambiguousLogged -> {
+                            ambiguousLogged = true
+                            LogStore.add("[$entry] 카드 안에 받기 버튼이 여러 개라 구분 불가 — 쿠폰 문구를 더 구체적으로(+로 연결) 적어주세요")
+                        }
+                    }
                 }
-            } else {
+            }
+            if (job.coupons.all { it in done }) return summarize(job, done, attempt)
+            if (!foundAny) {
                 misses++
                 if (root == null && misses % 20 == 1) LogStore.add("대상 앱(${job.pkg})이 전면에 없음")
                 if (root != null) {
                     if (misses % 3 == 1) dismissPopups(job, root)
                     if (job.refreshOnMiss && misses % 5 == 0) {
                         swipeDown()
-                        LogStore.add("#$attempt 타겟 없음 → 새로고침")
+                        LogStore.add("#$attempt 쿠폰이 안 보임 → 새로고침")
                     }
                 }
             }
             sleep(job.intervalMs)
         }
-        return Outcome("timeout", job.maxAttempts, "max_attempts 소진")
+        val missing = job.coupons.filter { it !in done }
+        val partial = if (done.isEmpty()) "" else summarize(job, done, maxAttempts).detail + " · "
+        return Outcome("timeout", maxAttempts, partial + "못 찾음/미완료: " + missing.joinToString(", "))
     }
 
-    private fun detect(job: Job, clickedAt: Long): Pair<String, String>? {
-        val groups = listOf(
-            "success" to job.successTexts,
-            "already" to job.alreadyTexts,
-            "soldout" to job.soldoutTexts,
-        )
+    private fun summarize(job: Job, done: Map<String, String>, attempts: Int): Outcome {
+        val parts = listOf("success", "already", "soldout", "clicked", "dry_run").mapNotNull { st ->
+            val names = job.coupons.filter { done[it] == st }
+            if (names.isEmpty()) null else "${label(st)}: ${names.joinToString(", ")}"
+        }
+        val values = done.values.toSet()
+        val overall = when {
+            "success" in values -> "success"
+            "soldout" in values && values.all { it == "soldout" || it == "already" } -> "soldout"
+            else -> values.firstOrNull() ?: "error"
+        }
+        return Outcome(overall, attempts, parts.joinToString(" / "))
+    }
+
+    /** 클릭 뒤 결과 확인: 토스트 또는 그 쿠폰 카드의 상태 문구. 확인 못 하면 null(재시도). */
+    private fun detectFor(job: Job, entry: String, clickedAt: Long, rules: CouponRules): String? {
         val deadline = SystemClock.elapsedRealtime() + job.resultWaitMs
         while (true) {
             val toast = if (lastToastAt >= clickedAt) lastToast else ""
-            val root = rootInActiveWindow
-            for ((status, texts) in groups) {
-                for (t in texts) {
-                    if (toast.contains(t)) return status to "토스트: $t"
-                    if (root != null && find(root, listOf(t)) != null) return status to t
-                }
+            if (toast.isNotEmpty()) {
+                if (job.successTexts.any { toast.contains(it) }) return "success"
+                if (job.alreadyTexts.any { toast.contains(it) }) return "already"
+                if (job.soldoutTexts.any { toast.contains(it) }) return "soldout"
+            }
+            val root = targetRoot(job)
+            if (root != null) {
+                val m = CouponMatcher.resolve(entry, { t -> findNodes(root, t) }, rules)
+                if (m?.state != null) return m.state
             }
             if (SystemClock.elapsedRealtime() >= deadline) return null
             sleep(100)
         }
     }
+
+    private fun rulesFor(job: Job) = CouponRules(
+        buttonTexts = job.targets,
+        successTexts = job.successTexts,
+        alreadyTexts = job.alreadyTexts,
+        soldoutTexts = job.soldoutTexts,
+        maxCardHeight = (resources.displayMetrics.heightPixels * 0.45).toInt(),
+    )
+
+    private fun findNodes(root: AccessibilityNodeInfo, text: String): List<UiNode> =
+        root.findAccessibilityNodeInfosByText(text).map { AxNode(it) }
 
     // ---- 화면 조작 ----
     private fun targetRoot(job: Job): AccessibilityNodeInfo? =
@@ -426,12 +683,6 @@ class MacroService : AccessibilityService() {
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
         startActivity(i)
         return true
-    }
-
-    private fun describe(n: AccessibilityNodeInfo): String {
-        val r = Rect()
-        n.getBoundsInScreen(r)
-        return "text='${n.text ?: ""}' desc='${n.contentDescription ?: ""}' id='${n.viewIdResourceName ?: ""}' bounds=${r.flattenToString()}"
     }
 
     private fun dumpScreen() {
@@ -550,4 +801,20 @@ class MacroService : AccessibilityService() {
             LogStore.add("알림 실패: $e")
         }
     }
+}
+
+/** AccessibilityNodeInfo -> UiNode 어댑터 */
+class AxNode(val raw: AccessibilityNodeInfo) : UiNode {
+    private val rect = Rect().also { raw.getBoundsInScreen(it) }
+    override val label: String
+        get() = raw.text?.toString()?.takeIf { it.isNotBlank() } ?: raw.contentDescription?.toString().orEmpty()
+    override val visible: Boolean get() = raw.isVisibleToUser
+    override val enabled: Boolean get() = raw.isEnabled
+    override val left: Int get() = rect.left
+    override val top: Int get() = rect.top
+    override val right: Int get() = rect.right
+    override val bottom: Int get() = rect.bottom
+    override val parent: UiNode? get() = raw.parent?.let { AxNode(it) }
+    override val children: List<UiNode>
+        get() = (0 until raw.childCount).mapNotNull { i -> raw.getChild(i)?.let { AxNode(it) } }
 }

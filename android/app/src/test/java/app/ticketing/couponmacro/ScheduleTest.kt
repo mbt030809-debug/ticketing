@@ -81,7 +81,7 @@ class ScheduleTest {
 
     @Test
     fun formStateUsesSlotsForLive() {
-        val f = FormState(pkg = "a.b", targets = "x")
+        val f = FormState(pkg = "a.b", targets = "x", coupons = "c")
         val ok = f.toJob(requireOpenAt = true, nowMs = kst(2026, 11, 5, 10, 0))
         assertNull(ok.error)
         assertEquals(kst(2026, 11, 5, 12, 0), ok.job!!.openAtMillis)

@@ -43,6 +43,7 @@ class MainActivity : Activity() {
     private lateinit var chips: LinearLayout
     private lateinit var nextLine: TextView
     private lateinit var routeLine: TextView
+    private lateinit var couponNote: TextView
     private lateinit var logView: TextView
     private var profile: Profile = Presets.ALL[0]
 
@@ -107,8 +108,22 @@ class MainActivity : Activity() {
             ),
         )
 
-        // 4) 시작
-        root.addView(section("4. 시작"))
+        // 4) 받을 쿠폰 (필수)
+        root.addView(section("4. 받을 쿠폰 (필수)"))
+        field(root, K_COUPONS, "받을 쿠폰 문구 (한 줄에 하나)", lines = 3).onChanged { refreshCouponNote() }
+        couponNote = note("")
+        root.addView(couponNote)
+        root.addView(row(button("화면에서 고르기") { startPick() }, button("목록 지우기") { clearCoupons() }))
+        root.addView(
+            note(
+                "[화면에서 고르기]: 대상 앱이 열리고(기록한 경로로 이동), 쿠폰 페이지에서 화면 위 [쿠폰 목록 읽기]를 누르면 " +
+                    "보이는 쿠폰이 목록으로 나옵니다. 받을 것만 체크하세요. 직접 적을 땐 쿠폰 카드에 적힌 문구(예: 5,000원 할인)를 한 줄에 하나씩, " +
+                    "비슷한 쿠폰이 있으면 +로 이으세요 (예: 5,000원+3만원 이상). 체크한 쿠폰의 버튼만 누릅니다.",
+            ),
+        )
+
+        // 5) 시작
+        root.addView(section("5. 시작"))
         root.addView(
             Button(this).apply {
                 text = "▶ 시작"
@@ -147,7 +162,7 @@ class MainActivity : Activity() {
             b.addView(launchCb)
             field(b, K_STEPS, "이동 단계 (한 줄에 하나, 해당 문구를 눌러 이동. 앞에 ? 붙이면 없어도 진행)", lines = 3)
                 .onChanged { refreshRoute() }
-            field(b, K_TARGETS, "받기 버튼 문구")
+            field(b, K_TARGETS, "받기 버튼 문구 (쿠폰 카드 안의 버튼)")
             field(b, K_SUCCESS, "성공 문구")
             field(b, K_ALREADY, "이미 받음 문구")
             field(b, K_SOLDOUT, "소진 문구")
@@ -194,6 +209,11 @@ class MainActivity : Activity() {
             saveCurrent()
             toast("경로 ${Parse.steps(steps).size}단계 저장됨")
         }
+        Store.takePendingCoupons(this, profile.id)?.let { c ->
+            fields.getValue(K_COUPONS).setText(c)
+            saveCurrent()
+            toast("쿠폰 ${Parse.coupons(c).size}개 저장됨")
+        }
         refreshStatus()
         LogStore.listener = { runOnUiThread { logView.text = LogStore.text(); refreshStatus() } }
         logView.text = LogStore.text()
@@ -226,7 +246,7 @@ class MainActivity : Activity() {
 
     private fun resetProfile() {
         AlertDialog.Builder(this)
-            .setMessage("'${profile.label}' 설정을 기본값으로 되돌릴까요? (대상 앱은 유지, 이동 경로·회차는 기본값으로)")
+            .setMessage("'${profile.label}' 설정을 기본값으로 되돌릴까요? (대상 앱은 유지, 이동 경로·받을 쿠폰·회차는 기본값으로)")
             .setPositiveButton("초기화") { _, _ ->
                 showForm(profile.defaults.copy(pkg = f(K_PKG).ifBlank { profile.defaults.pkg }))
                 saveCurrent()
@@ -285,6 +305,46 @@ class MainActivity : Activity() {
         val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
         cm.setPrimaryClip(ClipData.newPlainText("log", LogStore.text(300)))
         toast("로그 복사됨")
+    }
+
+    // ---- 받을 쿠폰 ----
+    private fun startPick() {
+        val svc = MacroService.instance
+        if (svc == null) {
+            toast("접근성 서비스를 먼저 켜세요")
+            return
+        }
+        if (f(K_PKG).isBlank()) {
+            toast("대상 앱을 먼저 선택하세요")
+            pickApp()
+            return
+        }
+        if (svc.isRunning() || svc.isRecording()) {
+            toast("실행/기록 중에는 쓸 수 없습니다")
+            return
+        }
+        saveCurrent()
+        val parsed = readForm().toJob(requireOpenAt = false, requireCoupons = false)
+        val job = parsed.job
+        if (job == null) {
+            toast(parsed.error ?: "입력 오류")
+            return
+        }
+        if (svc.startPicking(job, profile.id)) {
+            toast("대상 앱이 열립니다. 쿠폰 페이지가 보이면 화면 위 [쿠폰 목록 읽기]를 누르세요")
+        } else {
+            toast("시작할 수 없습니다")
+        }
+    }
+
+    private fun clearCoupons() {
+        fields.getValue(K_COUPONS).setText("")
+        saveCurrent()
+    }
+
+    private fun refreshCouponNote() {
+        val n = Parse.coupons(f(K_COUPONS)).size
+        couponNote.text = if (n == 0) "⚠ 받을 쿠폰이 정해지지 않았습니다. 정하지 않으면 시작할 수 없어요." else "받을 쿠폰 ${n}개: 체크한 쿠폰의 버튼만 누릅니다."
     }
 
     // ---- 쿠폰 페이지 가는 길 ----
@@ -496,7 +556,7 @@ class MainActivity : Activity() {
         name = profile.label, pkg = f(K_PKG).trim(), launchApp = launchCb.isChecked,
         openAt = "", leadMs = f(K_LEAD), intervalMs = f(K_INTERVAL),
         maxAttempts = f(K_ATTEMPTS), resultWaitSec = f(K_WAIT),
-        steps = f(K_STEPS), popups = f(K_POPUPS), targets = f(K_TARGETS),
+        steps = f(K_STEPS), popups = f(K_POPUPS), targets = f(K_TARGETS), coupons = f(K_COUPONS),
         success = f(K_SUCCESS), already = f(K_ALREADY), soldout = f(K_SOLDOUT),
         refreshOnMiss = refreshCb.isChecked,
         slots = slotsText, slot = slotSel,
@@ -512,6 +572,7 @@ class MainActivity : Activity() {
         fields.getValue(K_STEPS).setText(s.steps)
         fields.getValue(K_POPUPS).setText(s.popups)
         fields.getValue(K_TARGETS).setText(s.targets)
+        fields.getValue(K_COUPONS).setText(s.coupons)
         fields.getValue(K_SUCCESS).setText(s.success)
         fields.getValue(K_ALREADY).setText(s.already)
         fields.getValue(K_SOLDOUT).setText(s.soldout)
@@ -600,6 +661,7 @@ class MainActivity : Activity() {
         private const val K_STEPS = "steps"
         private const val K_POPUPS = "popups"
         private const val K_TARGETS = "targets"
+        private const val K_COUPONS = "coupons"
         private const val K_SUCCESS = "success"
         private const val K_ALREADY = "already"
         private const val K_SOLDOUT = "soldout"
