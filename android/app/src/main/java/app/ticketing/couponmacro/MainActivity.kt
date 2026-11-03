@@ -35,11 +35,8 @@ class MainActivity : Activity() {
 
     private val fields = LinkedHashMap<String, EditText>()
     private val profileButtons = LinkedHashMap<String, Button>()
-    private lateinit var launchCb: CheckBox
-    private lateinit var coldCb: CheckBox
     private lateinit var refreshCb: CheckBox
     private lateinit var dotsCb: CheckBox
-    private lateinit var routeAtOpenCb: CheckBox
     private lateinit var accStatus: TextView
     private lateinit var accBox: LinearLayout
     private lateinit var statusLine: TextView
@@ -187,10 +184,6 @@ class MainActivity : Activity() {
         collapsible(root, "고급 설정") { b ->
             b.addView(note("문구는 쉼표(,)로 구분, 부분 일치. 설정은 이벤트별로 자동 저장됩니다."))
             field(b, K_PKG, "대상 앱 패키지").onChanged { refreshAppLine() }
-            launchCb = CheckBox(this).apply { text = "시작 시 앱 자동 실행 (끄면 직접 쿠폰 페이지에 가 있어야 함)" }
-            b.addView(launchCb)
-            coldCb = CheckBox(this).apply { text = "앱을 새로 시작 (기록·재생 때 앱을 종료한 뒤 처음부터 열어 앱 상태/새로고침을 항상 같게)" }
-            b.addView(coldCb)
             field(b, K_STEPS, "이동 단계 (기록하면 자동 입력: 눌렀던 위치 @0.50,0.90~간격ms. 글자로 적을 수도 있음. 앞에 ? 붙이면 없어도 진행)", lines = 3)
                 .onChanged { refreshRoute() }
             field(b, K_TARGETS, "받기 버튼 문구 (쿠폰 카드 안의 버튼)")
@@ -198,8 +191,6 @@ class MainActivity : Activity() {
             field(b, K_ALREADY, "이미 받음 문구")
             field(b, K_SOLDOUT, "소진 문구")
             field(b, K_POPUPS, "자동으로 닫을 팝업 버튼 문구")
-            routeAtOpenCb = CheckBox(this).apply { text = "경로 이동을 오픈 정각에 시작 (끄면 미리 이동해 두고 대기)" }
-            b.addView(routeAtOpenCb)
             field(b, K_LAUNCH, "앱 실행 시점: 오픈 몇 초 전 (0~600, 기본 10)")
             field(b, K_AFTER_SCROLL, "스크롤이 끝난 뒤 다음 동작까지 대기 (초, 0~5, 기본 0 = 바로 — 스크롤 직후 클릭이 안 먹으면 0.3~0.5)")
             field(b, K_AFTER, "화면이 뜬 뒤 클릭까지 대기 (초, 0~5, 기본 0.5 — 뜨자마자 누르면 안 눌릴 때 늘리기)")
@@ -496,7 +487,7 @@ class MainActivity : Activity() {
             return
         }
         saveCurrent()
-        if (svc.startRecording(f(K_PKG).trim(), profile.id, coldCb.isChecked)) {
+        if (svc.startRecording(f(K_PKG).trim(), profile.id)) {
             toast("대상 앱을 새로 시작합니다. 앱이 다 뜬 뒤 쿠폰 페이지까지 이동하고 [■ 기록 끝]을 누르세요")
         } else {
             toast("기록을 시작할 수 없습니다 (앱 실행 실패 또는 이미 기록 중)")
@@ -730,7 +721,7 @@ class MainActivity : Activity() {
     private fun f(k: String) = fields.getValue(k).text.toString()
 
     private fun readForm() = FormState(
-        name = profile.label, pkg = f(K_PKG).trim(), launchApp = launchCb.isChecked, coldStart = coldCb.isChecked,
+        name = profile.label, pkg = f(K_PKG).trim(), 
         openAt = "", leadMs = f(K_LEAD), intervalMs = f(K_INTERVAL),
         maxAttempts = f(K_ATTEMPTS), resultWaitSec = f(K_WAIT),
         steps = f(K_STEPS), popups = f(K_POPUPS), targets = f(K_TARGETS), coupons = f(K_COUPONS),
@@ -738,7 +729,7 @@ class MainActivity : Activity() {
         refreshOnMiss = refreshCb.isChecked,
         slots = slotsText, slotsOff = slotsOff,
         autoRun = autoCb.isChecked, warnSec = f(K_WARN),
-        routeAtOpen = routeAtOpenCb.isChecked, launchLeadSec = f(K_LAUNCH), swipeSpeed = f(K_SWIPE), afterScreenSec = f(K_AFTER), afterScrollSec = f(K_AFTER_SCROLL),
+        launchLeadSec = f(K_LAUNCH), swipeSpeed = f(K_SWIPE), afterScreenSec = f(K_AFTER), afterScrollSec = f(K_AFTER_SCROLL),
         showDots = dotsCb.isChecked,
     )
 
@@ -746,8 +737,6 @@ class MainActivity : Activity() {
         loading = true
         try {
         fields.getValue(K_PKG).setText(s.pkg)
-        launchCb.isChecked = s.launchApp
-        coldCb.isChecked = s.coldStart
         fields.getValue(K_LEAD).setText(s.leadMs)
         fields.getValue(K_INTERVAL).setText(s.intervalMs)
         fields.getValue(K_ATTEMPTS).setText(s.maxAttempts)
@@ -766,7 +755,6 @@ class MainActivity : Activity() {
         fields.getValue(K_SWIPE).setText(s.swipeSpeed)
         fields.getValue(K_AFTER).setText(s.afterScreenSec)
         fields.getValue(K_AFTER_SCROLL).setText(s.afterScrollSec)
-        routeAtOpenCb.isChecked = s.routeAtOpen
         autoCb.isChecked = s.autoRun
         applySlots(s.slots, s.slotsOff)
         } finally {

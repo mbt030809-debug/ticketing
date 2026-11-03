@@ -16,110 +16,50 @@ class FlowTest {
 
     private fun job(
         steps: String = "",
-        launchApp: Boolean = true,
-        routeAtOpen: Boolean = true,
         refresh: Boolean = true,
     ): Job = FormState(
-        pkg = "a.b", targets = "x", coupons = "c", steps = steps, launchApp = launchApp,
-        routeAtOpen = routeAtOpen, refreshOnMiss = refresh, openAt = "2026-11-05 10:00:00",
+        pkg = "a.b", targets = "x", coupons = "c", steps = steps, refreshOnMiss = refresh, openAt = "2026-11-05 10:00:00",
     ).toJob(requireOpenAt = true).job!!
 
     @Test
-    fun reservedDefaultLaunchesThenRoutesAtOpen() {
-        val p = Flow.plan(job(route), Mode.LIVE, appInFront = false)
-        assertTrue(p.atOpen)
-        assertTrue(p.launch)
-        assertTrue(p.freshStart)
-        assertTrue(p.replayRoute)
-        assertTrue(p.waitForOpen)
-        assertFalse("정각 이동은 단계마다 로딩을 기다리지 않는다(속도 우선)", p.waitLoadedBetweenSteps)
-        assertFalse(p.preRefresh)
-    }
-
-    @Test
-    fun instantTestAndFindOnlyFollowTheRecordedRoute() {
-        // 회귀: 즉시 실행이 경로를 따라가지 않던 문제
-        for (mode in listOf(Mode.NOW, Mode.DRY)) {
-            for (front in listOf(true, false)) {
-                val p = Flow.plan(job(route), mode, appInFront = front)
-                assertTrue("$mode/$front", p.launch)
-                assertTrue(p.freshStart)
-                assertTrue(p.replayRoute)
-                assertFalse(p.waitForOpen)   // 오픈 시각을 기다리지는 않는다
-            }
+    fun recordingPickingTestAndReservationAllFollowTheSameFlow() {
+        // 회귀: 경로 기록은 앱이 새로 시작되는데 위치 지정/테스트는 앱이 새로고침되지 않아 환경이 달랐다.
+        // 모드에 따라 달라지는 건 오픈 시각을 기다리는지(예약만)뿐 — 경로 이동 여부는 경로가 있는지로만 정해진다
+        for (mode in listOf(Mode.LIVE, Mode.NOW, Mode.DRY)) {
+            val p = Flow.plan(job(route), mode)
+            assertTrue("$mode: 기록한 경로를 따라간다", p.replayRoute)
+            assertEquals("$mode: 오픈 시각은 예약만 기다린다", mode == Mode.LIVE, p.waitForOpen)
         }
-    }
-
-    @Test
-    fun testsRehearseTheReservedFlowLaunchWaitRouteThenSelect() {
-        // 회귀: 즉시 실행이 '앱 실행 → 5초 대기 → 경로 이동' 을 안 하고 앱을 열자마자 경로를 따라가던 문제
-        for (mode in listOf(Mode.NOW, Mode.DRY)) {
-            val p = Flow.plan(job(route), mode, appInFront = true)
-            assertTrue("$mode: 예약과 같은 정각 흐름", p.atOpen)
-            assertFalse("$mode: 단계마다 로딩을 기다리지 않는다(예약과 동일)", p.waitLoadedBetweenSteps)
+        for (mode in listOf(Mode.LIVE, Mode.NOW, Mode.DRY)) {
+            assertFalse("$mode: 경로가 없으면 따라갈 경로도 없다(앱은 그래도 같은 방식으로 새로 시작)", Flow.plan(job(), mode).replayRoute)
         }
-        // 지금을 '오픈 10초 전'으로 본다: 지금 앱 실행 → 10초(-lead) 뒤 경로 이동
-        val now = 1_000_000L
-        val r = Flow.rehearsal(job(route), now)
-        assertEquals(now + 10_000, r.openAtMillis)
-        val tl = Flow.timeline(r)
-        assertEquals(now, tl.launchAtMs)               // 앱 실행은 지금
-        assertEquals(now + 10_000 - 100, tl.fireAtMs)   // 경로 이동은 앱 실행 10초(-lead) 뒤
-        assertFalse(r.awaitUnlock)
-        // 사용자가 정한 '앱 실행 시점(초)'을 그대로 따른다
-        val custom = FormState(
-            pkg = "a.b", targets = "x", coupons = "c", steps = route, launchLeadSec = "8", openAt = "2026-11-05 10:00:00",
-        ).toJob(true).job!!
-        assertEquals(now + 8_000, Flow.rehearsal(custom, now).openAtMillis)
-    }
-
-    @Test
-    fun testsWithLegacyPreNavigateKeepTheOldFlow() {
-        // '경로 이동을 오픈 정각에 시작' 을 끈 사용자의 테스트는 예전처럼 앱 시작 후 바로 경로 이동
-        val p = Flow.plan(job(route, routeAtOpen = false), Mode.NOW, appInFront = true)
-        assertFalse(p.atOpen)
-        assertTrue(p.replayRoute)
-        assertTrue(p.waitLoadedBetweenSteps)
-    }
-
-    @Test
-    fun testWithoutRouteStaysOnTheCurrentScreen() {
-        val inFront = Flow.plan(job(), Mode.NOW, appInFront = true)
-        assertFalse("경로가 없으면 정각 흐름(앱 실행 후 대기)도 없다", inFront.atOpen)
-        assertFalse(inFront.launch)
-        assertFalse(inFront.replayRoute)
-        val notInFront = Flow.plan(job(), Mode.NOW, appInFront = false)
-        assertTrue("앱을 앞으로 가져오되", notInFront.launch)
-        assertFalse("첫 화면으로 초기화하지는 않는다", notInFront.freshStart)
     }
 
     @Test
     fun testsNeverPullToRefresh() {
         // 회귀: 테스트(즉시 실행)에서 못 찾을 때 화면만 위로 당기던 문제
         for (mode in listOf(Mode.NOW, Mode.DRY)) {
-            val p = Flow.plan(job(route), mode, appInFront = true)
-            assertFalse(p.pullRefreshOnMiss)
-            assertFalse(p.preRefresh)
+            assertFalse(Flow.plan(job(route), mode).pullRefreshOnMiss)
         }
-        assertTrue(Flow.plan(job(route, refresh = true), Mode.LIVE, true).pullRefreshOnMiss)
-        assertFalse(Flow.plan(job(route, refresh = false), Mode.LIVE, true).pullRefreshOnMiss)
+        assertTrue(Flow.plan(job(route, refresh = true), Mode.LIVE).pullRefreshOnMiss)
+        assertFalse(Flow.plan(job(route, refresh = false), Mode.LIVE).pullRefreshOnMiss)
     }
 
     @Test
-    fun legacyPreNavigateModeWaitsOnThePageAndPrelocates() {
-        val p = Flow.plan(job(route, routeAtOpen = false), Mode.LIVE, appInFront = false)
-        assertFalse(p.atOpen)
-        assertTrue(p.waitLoadedBetweenSteps)
-        assertTrue(p.preRefresh)
-        assertTrue(p.waitForOpen)
-        assertFalse(Flow.plan(job(route, routeAtOpen = false, refresh = false), Mode.LIVE, false).preRefresh)
-    }
-
-    @Test
-    fun autoLaunchOffStillReplaysRoute() {
-        val p = Flow.plan(job(route, launchApp = false), Mode.LIVE, appInFront = true)
-        assertFalse(p.launch)
-        assertTrue(p.replayRoute)
+    fun testsRehearseTheReservedTimetable() {
+        // 지금을 '오픈 10초 전'으로 본다: 지금 앱을 새로 시작 → 10초(-lead) 뒤 경로 이동 (예약과 같은 시간표)
+        val now = 1_000_000L
+        val r = Flow.rehearsal(job(route), now)
+        assertEquals(now + 10_000, r.openAtMillis)
+        val tl = Flow.timeline(r)
+        assertEquals(now, tl.launchAtMs)               // 앱 시작은 지금
+        assertEquals(now + 10_000 - 100, tl.fireAtMs)  // 경로 이동은 앱 시작 10초(-lead) 뒤
+        assertFalse(r.awaitUnlock)
+        // 사용자가 정한 '앱 실행 시점(초)'을 그대로 따른다
+        val custom = FormState(
+            pkg = "a.b", targets = "x", coupons = "c", steps = route, launchLeadSec = "8", openAt = "2026-11-05 10:00:00",
+        ).toJob(true).job!!
+        assertEquals(now + 8_000, Flow.rehearsal(custom, now).openAtMillis)
     }
 
     @Test

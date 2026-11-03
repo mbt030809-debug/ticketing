@@ -209,12 +209,10 @@ class JobTest {
     }
 
     @Test
-    fun reservedFlowDefaultsToLaunchFiveSecondsBeforeAndRouteAtOpen() {
+    fun reservedFlowDefaultsToLaunchTenSecondsBeforeOpen() {
         val job = FormState(pkg = "a.b", targets = "x", coupons = "c").toJob(false).job!!
-        assertTrue(job.routeAtOpen)
         assertEquals(10_000L, job.launchLeadMs) // 오픈 10초 전에 앱 실행
-        val custom = FormState(pkg = "a.b", targets = "x", coupons = "c", routeAtOpen = false, launchLeadSec = "12.5").toJob(false).job!!
-        assertFalse(custom.routeAtOpen)
+        val custom = FormState(pkg = "a.b", targets = "x", coupons = "c", launchLeadSec = "12.5").toJob(false).job!!
         assertEquals(12_500L, custom.launchLeadMs)
     }
 
@@ -247,15 +245,6 @@ class JobTest {
         assertNotNull(base.copy(afterScrollSec = "-1").toJob(false).error)
         assertNotNull(base.copy(afterScrollSec = "9").toJob(false).error)
         assertNotNull(base.copy(afterScrollSec = "x").toJob(false).error)
-    }
-
-    @Test
-    fun appIsRestartedFromScratchByDefaultSoRecordingAndReplayShareTheSameEnvironment() {
-        // 회귀: 경로를 기록할 때는 앱이 새로 시작(데이터 새로고침)되는데 테스트/예약 때는 살아 있는 앱이 그대로 떠서 환경이 달랐다
-        val base = FormState(pkg = "a.b", targets = "x", coupons = "c")
-        assertTrue(base.coldStart)
-        assertTrue(base.toJob(false).job!!.coldStart)
-        assertFalse(base.copy(coldStart = false).toJob(false).job!!.coldStart)
     }
 
     @Test
