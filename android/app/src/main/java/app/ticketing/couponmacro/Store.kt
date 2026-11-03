@@ -38,6 +38,7 @@ object Store {
             .putBoolean("autoRun", f.autoRun)
             .putBoolean("routeAtOpen", f.routeAtOpen)
             .putString("launchLeadSec", f.launchLeadSec)
+            .putBoolean("launchLead10", true) // 앱 실행 시점 기본값을 5초 -> 10초로 바꾼 뒤에 저장된 설정임(이후 사용자가 고른 값은 그대로 유지)
             .putString("swipeSpeed", f.swipeSpeed)
             .putString("afterScreenSec", f.afterScreenSec)
             .putString("afterScrollSec", f.afterScrollSec)
@@ -142,7 +143,9 @@ object Store {
             slotsOff = slotsOff,
             autoRun = p.getBoolean("autoRun", d.autoRun),
             routeAtOpen = p.getBoolean("routeAtOpen", d.routeAtOpen),
-            launchLeadSec = p.getString("launchLeadSec", d.launchLeadSec).orEmpty().ifBlank { d.launchLeadSec },
+            // 예전 기본값(5초)으로 저장돼 있던 설정은 새 기본값(10초 전 앱 실행)으로 옮긴다. 한 번 저장된 뒤엔 사용자가 고른 값을 그대로 쓴다
+            launchLeadSec = p.getString("launchLeadSec", d.launchLeadSec).orEmpty().ifBlank { d.launchLeadSec }
+                .let { if (!p.getBoolean("launchLead10", false) && it == "5") d.launchLeadSec else it },
             swipeSpeed = p.getString("swipeSpeed", d.swipeSpeed).orEmpty().ifBlank { d.swipeSpeed },
             afterScreenSec = p.getString("afterScreenSec", d.afterScreenSec).orEmpty().ifBlank { d.afterScreenSec },
             afterScrollSec = p.getString("afterScrollSec", d.afterScrollSec).orEmpty().ifBlank { d.afterScrollSec },

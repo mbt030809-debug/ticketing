@@ -212,7 +212,7 @@ class JobTest {
     fun reservedFlowDefaultsToLaunchFiveSecondsBeforeAndRouteAtOpen() {
         val job = FormState(pkg = "a.b", targets = "x", coupons = "c").toJob(false).job!!
         assertTrue(job.routeAtOpen)
-        assertEquals(5_000L, job.launchLeadMs)
+        assertEquals(10_000L, job.launchLeadMs) // 오픈 10초 전에 앱 실행
         val custom = FormState(pkg = "a.b", targets = "x", coupons = "c", routeAtOpen = false, launchLeadSec = "12.5").toJob(false).job!!
         assertFalse(custom.routeAtOpen)
         assertEquals(12_500L, custom.launchLeadMs)

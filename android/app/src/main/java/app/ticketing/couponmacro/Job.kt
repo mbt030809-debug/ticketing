@@ -101,7 +101,7 @@ data class Job(
     /** true(기본): 오픈 launchLeadMs 전에 앱 실행 → 오픈 정각에 경로 이동 → 쿠폰 받기. false: 미리 경로 이동해 두고 대기 */
     val routeAtOpen: Boolean = true,
     /** 오픈 몇 ms 전에 앱을 실행할지 (routeAtOpen 일 때) */
-    val launchLeadMs: Long = 5_000,
+    val launchLeadMs: Long = 10_000,
     /** 경로의 스와이프(스크롤) 재생 속도: 기록한 속도의 몇 배인지 */
     val swipeSpeed: Float = Gestures.DEFAULT_SWIPE_SPEED,
     /** 원하는 화면이 뜬 걸 확인한 뒤 클릭까지 더 기다리는 시간(ms) — 뜨자마자 누르면 버튼이 아직 눌리지 않는 경우 대비 */
@@ -318,7 +318,7 @@ data class FormState(
     /** 경로 이동을 오픈 정각에 시작할지 (끄면 미리 이동해 두고 대기) */
     val routeAtOpen: Boolean = true,
     /** 앱 실행 시점: 오픈 몇 초 전 (0~600) */
-    val launchLeadSec: String = "5",
+    val launchLeadSec: String = "10",
     /** 스크롤(스와이프) 재생 속도 배율: 기록한 속도의 몇 배 (0.5~8, 기본 2) */
     val swipeSpeed: String = "2",
     /** 원하는 화면이 뜬 뒤 클릭까지 대기(초, 0~5, 기본 0.5) */

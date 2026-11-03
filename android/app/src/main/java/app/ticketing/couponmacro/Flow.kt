@@ -44,7 +44,7 @@ object Flow {
 
     /**
      * 테스트(즉시 실행/찾기만)용: 지금 시각을 '오픈'으로 보고 오픈 launchLeadMs 뒤로 잡는다 —
-     * 지금 앱 실행 → launchLeadMs(기본 5초) 뒤 경로 이동 → 쿠폰 선택. 예약 실행과 같은 시간표를 그대로 쓴다.
+     * 지금 앱 실행 → launchLeadMs(기본 10초) 뒤 경로 이동 → 쿠폰 선택. 예약 실행과 같은 시간표를 그대로 쓴다.
      */
     fun rehearsal(job: Job, nowMs: Long): Job = job.copy(openAtMillis = nowMs + job.launchLeadMs, awaitUnlock = false)
 

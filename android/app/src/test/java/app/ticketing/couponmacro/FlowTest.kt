@@ -58,13 +58,13 @@ class FlowTest {
             assertTrue("$mode: 예약과 같은 정각 흐름", p.atOpen)
             assertFalse("$mode: 단계마다 로딩을 기다리지 않는다(예약과 동일)", p.waitLoadedBetweenSteps)
         }
-        // 지금을 '오픈 5초 전'으로 본다: 지금 앱 실행 → 5초(-lead) 뒤 경로 이동
+        // 지금을 '오픈 10초 전'으로 본다: 지금 앱 실행 → 10초(-lead) 뒤 경로 이동
         val now = 1_000_000L
         val r = Flow.rehearsal(job(route), now)
-        assertEquals(now + 5_000, r.openAtMillis)
+        assertEquals(now + 10_000, r.openAtMillis)
         val tl = Flow.timeline(r)
         assertEquals(now, tl.launchAtMs)               // 앱 실행은 지금
-        assertEquals(now + 5_000 - 100, tl.fireAtMs)   // 경로 이동은 앱 실행 5초(-lead) 뒤
+        assertEquals(now + 10_000 - 100, tl.fireAtMs)   // 경로 이동은 앱 실행 10초(-lead) 뒤
         assertFalse(r.awaitUnlock)
         // 사용자가 정한 '앱 실행 시점(초)'을 그대로 따른다
         val custom = FormState(
@@ -125,7 +125,7 @@ class FlowTest {
     @Test
     fun timelineLaunchesFiveSecondsBeforeAndRoutesAtOpen() {
         val tl = Flow.timeline(job(route))
-        assertEquals(open - 5_000, tl.launchAtMs)   // 앱 실행: 오픈 5초 전
+        assertEquals(open - 10_000, tl.launchAtMs)  // 앱 실행: 오픈 10초 전
         assertEquals(open - 100, tl.fireAtMs)       // 경로 이동/클릭: 정각(lead 100ms 보정)
         assertTrue(tl.launchAtMs < tl.fireAtMs)
     }
