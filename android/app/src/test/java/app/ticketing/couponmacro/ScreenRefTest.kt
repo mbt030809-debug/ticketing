@@ -92,8 +92,17 @@ class ScreenRefTest {
 class ScreenWaitTest {
     private val ref = fakePage(0)
 
-    /** 기준과 약 86% 만 같은 화면: 거의 똑같다(90%)고는 못 하지만 같은 화면(80%)으로는 볼 수 있다 */
-    private val near = IntArray(ref.size) { if (it % 7 == 0) (ref[it] + 100) % 256 else ref[it] }
+    /** (0.5, 0.5) 를 누를 때 그 주변으로 보는 칸들 */
+    private fun aroundTap(i: Int): Boolean = (i / ScreenRef.COLS) in 19..21 && (i % ScreenRef.COLS) in 10..14
+
+    /** 누를 자리 주변 15칸 중 3칸만 다른 화면: 전체는 거의 같지만 주변은 80% (거의 똑같다/빠른 인정(85%)에는 못 미침) */
+    private val nearRegion = ref.copyOf().also { for (c in 10..12) it[20 * ScreenRef.COLS + c] = (it[20 * ScreenRef.COLS + c] + 100) % 256 }
+
+    /** 누를 자리 주변은 같고 나머지의 k/20 칸이 다른 화면 (k=6 -> 전체 약 70%, 9 -> 56%, 11 -> 46%) */
+    private fun outsideChanged(k: Int) = IntArray(ref.size) { i -> if (!aroundTap(i) && i % 20 < k) (ref[i] + 100) % 256 else ref[i] }
+
+    /** 앞 화면(A): 기준 화면과 전체 80% 만 같은 다른 화면 */
+    private val prevScreen = IntArray(ref.size) { i -> if (!aroundTap(i) && i % 5 == 0) (ref[i] + 100) % 256 else ref[i] }
 
     @Test
     fun exactlyTheSameScreenIsAcceptedAtOnce() {
@@ -103,15 +112,60 @@ class ScreenWaitTest {
     }
 
     @Test
+    fun couponButtonAreaShownIsEnoughWithoutWaitingForFullLoading() {
+        // 회귀: 화면 전체 로딩이 끝나길 기다리느라 너무 느렸다. 전환됐고 누를 자리(쿠폰 버튼)가 보이면 나머지(배너 등)가 덜 떠도 바로 누른다
+        val cur = outsideChanged(6)
+        val s = ScreenRef.score(ref, cur, 0.5f, 0.5f)
+        assertTrue("전체 일치가 70% 안팎이어야 함: ${s.global}", s.global in 0.65f..0.75f)
+        assertEquals(ScreenVerdict.MATCH, ScreenWait(ref, 0.5f, 0.5f, startMs = 0).update(cur, 100))
+    }
+
+    @Test
+    fun fastAcceptGetsLooserTheLongerItWaits() {
+        // 전체 일치 약 56%: 처음엔 안 되고(60% 필요) 3초 뒤부터 인정(50%)
+        val a = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
+        assertEquals(ScreenVerdict.WAIT, a.update(outsideChanged(9), 100))
+        assertEquals(ScreenVerdict.WAIT, a.update(outsideChanged(9), ScreenRef.FAST1_AFTER_MS - 100))
+        assertEquals(ScreenVerdict.MATCH, a.update(outsideChanged(9), ScreenRef.FAST1_AFTER_MS + 100))
+        // 전체 일치 약 46%: 8초 뒤부터 인정(40%)
+        val b = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
+        assertEquals(ScreenVerdict.WAIT, b.update(outsideChanged(11), ScreenRef.FAST1_AFTER_MS + 100))
+        assertEquals(ScreenVerdict.WAIT, b.update(outsideChanged(11), ScreenRef.FAST2_AFTER_MS - 100))
+        assertEquals(ScreenVerdict.MATCH, b.update(outsideChanged(11), ScreenRef.FAST2_AFTER_MS + 100))
+    }
+
+    @Test
+    fun notYetTransitionedScreenIsNeverTapped() {
+        // 아직 앞 화면(A)이 그대로면(누른 게 안 넘어갔거나 렉) 누를 자리가 비슷해 보여도 누르지 않는다
+        assertTrue(ScreenRef.score(prevScreen, prevScreen, null, null).global >= ScreenRef.LEFT_PREV)
+        val w = ScreenWait(ref, 0.5f, 0.5f, startMs = 0, prev = prevScreen)
+        assertEquals(ScreenVerdict.WAIT, w.update(prevScreen, 100))
+        assertEquals(ScreenVerdict.WAIT, w.update(prevScreen, 500))
+        assertEquals(ScreenVerdict.WAIT, w.update(prevScreen, ScreenRef.FAST2_AFTER_MS + 500)) // 오래 기다려도 앞 화면이면 안 누름
+        // 화면이 전환되어 쿠폰 화면이 뜨면 바로
+        val cur = outsideChanged(6)
+        assertTrue(ScreenRef.score(prevScreen, cur, null, null).global < ScreenRef.LEFT_PREV)
+        assertEquals(ScreenVerdict.MATCH, w.update(cur, ScreenRef.FAST2_AFTER_MS + 900))
+    }
+
+    @Test
+    fun couponScreenWithoutATapPointOnlyNeedsTheTransitionAndRoughMatch() {
+        // 기록을 끝낸 순간의 화면(누를 자리 모름): 전환됐고 전체가 대충 맞으면 인정
+        val w = ScreenWait(ref, null, null, startMs = 0, prev = prevScreen)
+        assertEquals(ScreenVerdict.WAIT, w.update(prevScreen, 100))
+        assertEquals(ScreenVerdict.MATCH, w.update(outsideChanged(6), 500))
+    }
+
+    @Test
     fun similarButNotExactNeedsTwoConsecutiveMatches() {
-        val w = ScreenWait(ref, null, null, startMs = 0)
-        assertEquals(ScreenVerdict.WAIT, w.update(near, 100))
-        assertEquals(ScreenVerdict.MATCH, w.update(near, 500))
+        val w = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
+        assertEquals(ScreenVerdict.WAIT, w.update(nearRegion, 100))
+        assertEquals(ScreenVerdict.MATCH, w.update(nearRegion, 500))
     }
 
     @Test
     fun screenStillScrollingNeverMatchesAndTimesOut() {
-        // 스크롤 전(맨 위) 화면에서는 누르지 않는다 — 기다리다 시간이 다 되면 그대로 진행
+        // 스크롤 전(맨 위) 화면에서는 누르지 않는다 — 한참 기다리다 시간이 다 되면 어쩔 수 없이 진행
         val w = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
         var t = 100L
         while (t < ScreenRef.MAX_WAIT_MS) {
@@ -132,27 +186,28 @@ class ScreenWaitTest {
     @Test
     fun aPassingSimilarScreenDoesNotCount() {
         // 비슷해 보이는 화면이 잠깐 지나간 것만으로는 누르지 않는다(연속 2회 필요)
-        val w = ScreenWait(ref, null, null, startMs = 0)
-        assertEquals(ScreenVerdict.WAIT, w.update(near, 100))
+        val w = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
+        assertEquals(ScreenVerdict.WAIT, w.update(nearRegion, 100))
         assertEquals(ScreenVerdict.WAIT, w.update(fakePage(2), 500))
-        assertEquals(ScreenVerdict.WAIT, w.update(near, 900))
-        assertEquals(ScreenVerdict.MATCH, w.update(near, 1_300))
+        assertEquals(ScreenVerdict.WAIT, w.update(nearRegion, 900))
+        assertEquals(ScreenVerdict.MATCH, w.update(nearRegion, 1_300))
     }
 
     @Test
     fun captureFailureBreaksTheStreak() {
-        val w = ScreenWait(ref, null, null, startMs = 0)
-        assertEquals(ScreenVerdict.WAIT, w.update(near, 100))
+        val w = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
+        assertEquals(ScreenVerdict.WAIT, w.update(nearRegion, 100))
         assertEquals(ScreenVerdict.WAIT, w.update(null, 500))
-        assertEquals(ScreenVerdict.WAIT, w.update(near, 900))
-        assertEquals(ScreenVerdict.MATCH, w.update(near, 1_300))
+        assertEquals(ScreenVerdict.WAIT, w.update(nearRegion, 900))
+        assertEquals(ScreenVerdict.MATCH, w.update(nearRegion, 1_300))
     }
 
     @Test
     fun looserMatchOnlyAfterWaitingLong() {
-        // 배너 등이 계속 바뀌어 77% 만 같은 화면: 처음엔 안 맞고, 조금 기다리면 인정
-        val cur = IntArray(ref.size) { if (it % 9 < 2) (ref[it] + 100) % 256 else ref[it] }
-        val w = ScreenWait(ref, null, null, startMs = 0)
+        // 주변은 80%, 전체는 77%: 평소(80%)엔 안 되고 3초 넘게 기다리면 70% 기준으로 연속 2회에 인정
+        val cur = IntArray(ref.size) { i -> if (!aroundTap(i) && i % 9 < 2) (ref[i] + 100) % 256 else ref[i] }
+            .also { for (c in 10..12) it[20 * ScreenRef.COLS + c] = (it[20 * ScreenRef.COLS + c] + 100) % 256 }
+        val w = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
         val relax = ScreenRef.RELAX_AFTER_MS
         assertEquals(ScreenVerdict.WAIT, w.update(cur, 100))
         assertEquals(ScreenVerdict.WAIT, w.update(cur, relax - 500))
@@ -176,27 +231,6 @@ class ScreenWaitTest {
     }
 
     @Test
-    fun veryLooseMatchOnlyAfterVeryLongWait() {
-        // 65% 만 같은 화면(타이머/배너가 계속 바뀜): 10초 넘게 기다린 뒤에야 인정
-        // (누를 자리 주변은 같고, 나머지의 1/3 이 다름)
-        val cur = IntArray(ref.size) { i ->
-            val r = i / ScreenRef.COLS
-            val c = i % ScreenRef.COLS
-            val aroundTap = r in 19..21 && c in 10..14
-            if (!aroundTap && i % 3 == 0) (ref[i] + 100) % 256 else ref[i]
-        }
-        val s = ScreenRef.score(ref, cur, 0.5f, 0.5f)
-        assertTrue("테스트 화면이 65% 안팎이어야 함: ${s.global}", s.global in 0.6f..0.7f)
-        assertTrue(s.region >= ScreenRef.REGION)
-        val w = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
-        assertEquals(ScreenVerdict.WAIT, w.update(cur, 100))
-        assertEquals(ScreenVerdict.WAIT, w.update(cur, ScreenRef.RELAX_AFTER_MS + 500))
-        assertEquals(ScreenVerdict.WAIT, w.update(cur, ScreenRef.VERY_RELAX_AFTER_MS - 500))
-        assertEquals(ScreenVerdict.WAIT, w.update(cur, ScreenRef.VERY_RELAX_AFTER_MS + 100))
-        assertEquals(ScreenVerdict.MATCH, w.update(cur, ScreenRef.VERY_RELAX_AFTER_MS + 500))
-    }
-
-    @Test
     fun tappedNeighborhoodMustAlwaysMatch() {
         // 전체는 거의 같아도 누를 자리 주변이 다르면(다른 버튼이 있음) 누르지 않는다
         val cur = ref.copyOf()
@@ -204,8 +238,8 @@ class ScreenWaitTest {
         val w = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
         assertEquals(ScreenVerdict.WAIT, w.update(cur, 100))
         assertEquals(ScreenVerdict.WAIT, w.update(cur, 500))
-        assertEquals(ScreenVerdict.WAIT, w.update(cur, ScreenRef.RELAX_AFTER_MS + 100))
-        assertEquals(ScreenVerdict.WAIT, w.update(cur, ScreenRef.RELAX_AFTER_MS + 500))
+        assertEquals(ScreenVerdict.WAIT, w.update(cur, ScreenRef.FAST2_AFTER_MS + 100))
+        assertEquals(ScreenVerdict.WAIT, w.update(cur, ScreenRef.FAST2_AFTER_MS + 500))
     }
 }
 

@@ -147,7 +147,7 @@ class MacroService : AccessibilityService() {
     @Volatile private var guardHeld = false
 
     /** 통과 설정이 입력 시스템에 닿을 때까지 기다리는 시간. 잠금 창이 매크로 동작을 가로채면 늘린다 */
-    @Volatile private var guardSettleMs = 70L
+    @Volatile private var guardSettleMs = 40L
 
     /** 이 기기에서 잠금 창이 매크로 동작을 계속 가로채 잠금을 포기했는지(이 실행 동안) */
     @Volatile private var guardDropped = false
@@ -978,7 +978,7 @@ class MacroService : AccessibilityService() {
         for ((i, s) in job.steps.withIndex()) {
             if (useRefs && !(i == 0 && firstScreenChecked) && route.waits[i]) {
                 val ref = route.grids[i]
-                val v = if (ref == null) null else awaitScreen(ref, s.hintX, s.hintY, "이동 ${i + 1}/$n", maxWait)
+                val v = if (ref == null) null else awaitScreen(ref, s.hintX, s.hintY, "이동 ${i + 1}/$n", maxWait, route.grids.getOrNull(i - 1))
                 if (v == null) {
                     useRefs = false // 화면 캡처가 안 되는 기기/상태 — 이 실행은 시간 기준으로
                     cur = settleAfterStep(job, null, Settle.minWaitMs(s.delayMs, false), "이동 ${i + 1}/$n")
@@ -1003,7 +1003,7 @@ class MacroService : AccessibilityService() {
             if (useRefs && last) {
                 val end = route.end
                 if (end != null) {
-                    if (awaitScreen(end, null, null, "쿠폰 화면", maxWait) != null) continue
+                    if (awaitScreen(end, null, null, "쿠폰 화면", maxWait, route.grids.getOrNull(n - 1)) != null) continue
                     useRefs = false
                 }
             }
@@ -1035,9 +1035,11 @@ class MacroService : AccessibilityService() {
      * 지금 화면이 기록 때 화면(ref)과 같아 보일 때까지 기다린다 (ScreenWait 규칙: 연속 2회 일치, 최대 9초).
      * @return MATCH: 화면이 나타남 / TIMEOUT: 시간이 다 돼 그대로 진행 / null: 화면 캡처를 할 수 없음(시간 기준으로 전환 필요)
      */
-    private fun awaitScreen(ref: IntArray, fx: Float?, fy: Float?, why: String, maxWaitMs: Long = ScreenRef.MAX_WAIT_MS): ScreenVerdict? {
+    private fun awaitScreen(
+        ref: IntArray, fx: Float?, fy: Float?, why: String, maxWaitMs: Long = ScreenRef.MAX_WAIT_MS, prev: IntArray? = null,
+    ): ScreenVerdict? {
         val start = SystemClock.elapsedRealtime()
-        val w = ScreenWait(ref, fx, fy, start, maxWaitMs)
+        val w = ScreenWait(ref, fx, fy, start, maxWaitMs, prev)
         var fails = 0
         var lastLog = start
         fun pct(v: Float?) = "${((v ?: 0f) * 100).toInt()}%"
@@ -1922,7 +1924,7 @@ class MacroService : AccessibilityService() {
             try {
                 send(0, null)
                 finished.await(total + 2_000, TimeUnit.MILLISECONDS)
-                if (guardOn) Thread.sleep(25) // 가로채기 감지가 끝날 시간
+                if (guardOn) Thread.sleep(15) // 가로채기 감지가 끝날 시간
             } finally {
                 macroTouch = null
                 if (ownsPass) releaseGuardPass()
@@ -1993,7 +1995,7 @@ class MacroService : AccessibilityService() {
             val ok = dispatchGesture(g, cb, null)
             if (ok) {
                 done.await(durationMs + 800, TimeUnit.MILLISECONDS)
-                Thread.sleep(25) // 가로채기 감지(터치 이벤트 전달)가 끝날 시간
+                Thread.sleep(15) // 가로채기 감지(터치 이벤트 전달)가 끝날 시간
             }
             macroTouch = null
             if (own) releaseGuardPass()

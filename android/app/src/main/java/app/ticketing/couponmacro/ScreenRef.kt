@@ -31,6 +31,22 @@ object ScreenRef {
     const val EXACT = 0.90f
     const val EXACT_REGION = 0.85f
 
+    /**
+     * 빠른 인정: 화면이 이전 화면에서 전환됐고(전체가 다 로딩되길 기다리지 않음) 누를 자리 주변이 기록 때와 같아 보이면 한 번만 봐도 누른다.
+     * 전체 일치는 '대충 그 화면' 정도(60%)만 보고, 오래 기다리면 더 느슨하게(3초 후 50%, 8초 후 40% / 주변 80%).
+     * 전체 로딩(배너·이미지·타이머)이 끝나길 기다리면 선착순에서 너무 늦으므로, 누를 자리(쿠폰 버튼)가 뜨는 순간을 기준으로 한다.
+     */
+    const val FAST_GLOBAL = 0.60f
+    const val FAST_REGION = 0.85f
+    const val FAST1_AFTER_MS = 3_000L
+    const val FAST1_GLOBAL = 0.50f
+    const val FAST2_AFTER_MS = 8_000L
+    const val FAST2_GLOBAL = 0.40f
+    const val FAST2_REGION = 0.80f
+
+    /** 지금 화면이 '이전 화면'과 이 비율 이상 같으면 아직 화면이 전환되지 않은 것 */
+    const val LEFT_PREV = 0.90f
+
     /** 누른 곳 주변(가로 ±2칸, 세로 ±1칸)의 같은 칸 비율 */
     const val REGION = 0.75f
 
@@ -126,6 +142,8 @@ enum class ScreenVerdict { WAIT, MATCH, TIMEOUT }
 /**
  * 기록 때 화면(ref)이 지금 화면으로 나타나기를 기다리는 판정.
  *  - 거의 똑같으면(EXACT) 한 번만 봐도 '나타남' — 스크롤/전환이 끝나 기록 때와 똑같아진 화면
+ *  - 화면이 이전 화면에서 전환됐고 누를 자리 주변이 기록 때와 같아 보이면(전체는 60% 정도만 같아도) 한 번만 봐도 '나타남'
+ *    — 전체 로딩이 끝나길 기다리지 않고 쿠폰 화면이 뜨는 순간 누른다 (prev 가 있으면 전환 여부를 확인, 아직 앞 화면이면 안 누름)
  *  - 그 정도는 아니면(STRICT 이상) 연속 두 번 맞아야 '나타남'(애니메이션이 지나가는 순간에 속지 않도록)
  *  - RELAX_AFTER_MS 넘게 안 맞으면 RELAXED, VERY_RELAX_AFTER_MS 넘으면 VERY_RELAXED 로 완화(배너가 계속 바뀌는 화면 대비)
  *  - 누른 곳 주변은 항상 REGION 이상 같아야 함
@@ -137,6 +155,8 @@ class ScreenWait(
     private val fy: Float?,
     private val startMs: Long,
     private val maxWaitMs: Long = ScreenRef.MAX_WAIT_MS,
+    /** 이 동작 직전(= 앞 단계를 누르기 전)의 기록 화면. 있으면 '화면이 전환됐는지'를 확인한다 */
+    private val prev: IntArray? = null,
 ) {
     var last: ScreenRef.Score? = null
         private set
@@ -151,13 +171,29 @@ class ScreenWait(
             val s = ScreenRef.score(ref, cur, fx, fy)
             last = s
             if (s.global >= ScreenRef.EXACT && s.region >= ScreenRef.EXACT_REGION) return ScreenVerdict.MATCH
-            val need = when {
-                elapsed >= ScreenRef.VERY_RELAX_AFTER_MS -> ScreenRef.VERY_RELAXED
-                elapsed >= ScreenRef.RELAX_AFTER_MS -> ScreenRef.RELAXED
-                else -> ScreenRef.STRICT
+            // 화면이 이전 화면에서 전환됐는가 (앞 화면이 그대로면 아직 안 넘어간 것 — 누르면 안 된다)
+            val transitioned = prev == null || ScreenRef.score(prev, cur, null, null).global < ScreenRef.LEFT_PREV
+            if (!transitioned) {
+                streak = 0
+            } else {
+                // 빠른 인정: 전환됐고 누를 자리가 보이면(전체 로딩은 기다리지 않고) 한 번만 봐도 인정
+                val fastGlobal = when {
+                    elapsed >= ScreenRef.FAST2_AFTER_MS -> ScreenRef.FAST2_GLOBAL
+                    elapsed >= ScreenRef.FAST1_AFTER_MS -> ScreenRef.FAST1_GLOBAL
+                    else -> ScreenRef.FAST_GLOBAL
+                }
+                val fastRegion = if (elapsed >= ScreenRef.FAST2_AFTER_MS) ScreenRef.FAST2_REGION else ScreenRef.FAST_REGION
+                val regionOk = fx == null || s.region >= fastRegion // 누를 자리를 모르는 확인(쿠폰 화면 등)은 전체 일치만 본다
+                if (regionOk && s.global >= fastGlobal) return ScreenVerdict.MATCH
+                // 그 정도는 아니면 연속 2회 확인
+                val need = when {
+                    elapsed >= ScreenRef.VERY_RELAX_AFTER_MS -> ScreenRef.VERY_RELAXED
+                    elapsed >= ScreenRef.RELAX_AFTER_MS -> ScreenRef.RELAXED
+                    else -> ScreenRef.STRICT
+                }
+                if (s.global >= need && s.region >= ScreenRef.REGION) streak++ else streak = 0
+                if (streak >= 2) return ScreenVerdict.MATCH
             }
-            if (s.global >= need && s.region >= ScreenRef.REGION) streak++ else streak = 0
-            if (streak >= 2) return ScreenVerdict.MATCH
         }
         return if (elapsed >= maxWaitMs) ScreenVerdict.TIMEOUT else ScreenVerdict.WAIT
     }
