@@ -250,6 +250,15 @@ class JobTest {
     }
 
     @Test
+    fun appIsRestartedFromScratchByDefaultSoRecordingAndReplayShareTheSameEnvironment() {
+        // 회귀: 경로를 기록할 때는 앱이 새로 시작(데이터 새로고침)되는데 테스트/예약 때는 살아 있는 앱이 그대로 떠서 환경이 달랐다
+        val base = FormState(pkg = "a.b", targets = "x", coupons = "c")
+        assertTrue(base.coldStart)
+        assertTrue(base.toJob(false).job!!.coldStart)
+        assertFalse(base.copy(coldStart = false).toJob(false).job!!.coldStart)
+    }
+
+    @Test
     fun launchLeadMustBeBetweenZeroAndSixHundredSeconds() {
         val base = FormState(pkg = "a.b", targets = "x", coupons = "c")
         assertNotNull(base.copy(launchLeadSec = "-1").toJob(false).error)

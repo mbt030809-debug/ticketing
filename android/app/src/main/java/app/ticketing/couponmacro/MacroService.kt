@@ -3,6 +3,7 @@ package app.ticketing.couponmacro
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
+import android.app.ActivityManager
 import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
@@ -389,16 +390,27 @@ class MacroService : AccessibilityService() {
     fun isRecording(): Boolean = recordPkg != null
 
     /** 대상 앱을 첫 화면으로 열고 기록 시작. 화면 위에 [■ 기록 끝] 버튼이 뜬다. */
-    fun startRecording(pkg: String, profileId: String): Boolean {
+    fun startRecording(pkg: String, profileId: String, cold: Boolean = true): Boolean {
         if (isRunning() || isRecording()) return false
+        if (packageManager.getLaunchIntentForPackage(pkg) == null) return false
         synchronized(recorded) { recorded.clear() }
         stopping = false
         recordProfile = profileId
-        if (!launch(pkg)) return false
-        lastRecordAt = SystemClock.elapsedRealtime()
-        recordPkg = pkg
-        showRecordOverlay()
-        LogStore.add("경로 기록 시작: 쿠폰 페이지까지 평소처럼 눌러 이동한 뒤 [■ 기록 끝]")
+        recordPkg = pkg // 앱을 새로 시작하는 동안에도 '기록 중'으로 두어 다른 작업이 끼어들지 않게
+        Thread({
+            try {
+                // 재생할 때와 똑같이 앱을 시작한다(앱 종료 후 처음부터) -> 기록할 때와 재생할 때 환경이 같다
+                val ok = if (cold) coldStart(pkg) else launch(pkg)
+                if (!ok) throw IllegalStateException("앱 실행 실패")
+                lastRecordAt = SystemClock.elapsedRealtime()
+                showRecordOverlay()
+                LogStore.add("경로 기록 시작(${if (cold) "앱을 새로 시작함" else "앱 실행"}): 앱이 다 뜬 뒤 쿠폰 페이지까지 평소처럼 눌러 이동하고 [■ 기록 끝]")
+            } catch (e: Exception) {
+                recordPkg = null
+                LogStore.add("경로 기록을 시작하지 못했습니다: $e")
+                notifyResult("경로 기록", "시작하지 못했습니다: ${e.message}")
+            }
+        }, "record-start").start()
         return true
     }
 
@@ -648,7 +660,7 @@ class MacroService : AccessibilityService() {
         try {
             if (job.launchApp) {
                 val fresh = job.steps.isNotEmpty() // 경로를 따라갈 때만 첫 화면에서 시작
-                if (!launch(job.pkg, fresh)) {
+                if (!startTarget(job, fresh)) {
                     LogStore.add("앱 실행 실패: ${job.pkg}")
                     return
                 }
@@ -1265,9 +1277,10 @@ class MacroService : AccessibilityService() {
         )
 
         if (plan.launch) {
-            waitUntil(launchAt, offset)
+            // 앱을 새로 시작하려면 준비(홈으로 보내기 + 프로세스 종료)가 필요해서 그만큼 앞당겨 시작한다
+            waitUntil(launchAt - if (plan.freshStart && job.coldStart) Settle.COLD_PREP_MS else 0L, offset)
             showRunGuard() // 앱을 여는 순간부터 사용자 터치 차단 + 긴급 정지 버튼
-            if (!launch(job.pkg, fresh = plan.freshStart)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
+            if (!startTarget(job, plan.freshStart)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
             tlMark("앱 실행")
             LogStore.add(if (hasRoute) "앱 실행(첫 화면에서 시작): ${job.pkg}" else "앱을 앞으로 가져옴(현재 화면 유지): ${job.pkg}")
             if (!waitForeground(job, 3_000)) {
@@ -1385,7 +1398,7 @@ class MacroService : AccessibilityService() {
 
         if (mode != Mode.LIVE) showRunGuard() // 테스트는 시작하자마자 잠금 (예약은 오픈 직전에 아래에서)
         if (plan.launch) {
-            if (!launch(job.pkg, plan.freshStart)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
+            if (!startTarget(job, plan.freshStart)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
             LogStore.add(if (plan.freshStart) "앱 실행(첫 화면에서 시작): ${job.pkg}" else "앱을 앞으로 가져옴(현재 화면 유지): ${job.pkg}")
             sleep(1500)
             if (!waitForeground(job, 6_000)) {
@@ -2166,6 +2179,38 @@ class MacroService : AccessibilityService() {
             dropGuardWindow()
         }
         return attempt < 3
+    }
+
+    /** 경로를 따라갈 때(fresh)는 설정에 따라 앱을 새로 시작(coldStart)하거나 그냥 첫 화면부터 연다 */
+    private fun startTarget(job: Job, fresh: Boolean): Boolean {
+        val ok = if (fresh && job.coldStart) coldStart(job.pkg) else launch(job.pkg, fresh)
+        return ok
+    }
+
+    /**
+     * 앱을 '새로 시작'한다 — 경로를 기록할 때와 재생할 때 앱 상태(데이터 새로고침 등)를 같게 하려고 항상 같은 방식으로 연다.
+     *  ① 대상 앱이 앞에 있으면 홈으로 보내고(앞에 있는 앱은 종료할 수 없다) ② 백그라운드 프로세스를 종료한 뒤 ③ 첫 화면부터 실행.
+     * 프로세스가 살아 있으면 앱이 첫 화면을 다시 만들기만 하고 데이터는 새로고침하지 않는 경우가 있어서 기록 때와 환경이 달라진다.
+     * (종료는 시스템이 허용하는 범위에서 최선 — 서비스가 떠 있는 앱 등은 종료되지 않을 수 있다)
+     */
+    private fun coldStart(pkg: String): Boolean {
+        val front = try {
+            rootInActiveWindow?.packageName?.toString() == pkg
+        } catch (_: Exception) {
+            false
+        }
+        if (front) {
+            performGlobalAction(GLOBAL_ACTION_HOME)
+            Thread.sleep(700)
+        }
+        try {
+            (getSystemService(ACTIVITY_SERVICE) as ActivityManager).killBackgroundProcesses(pkg)
+            LogStore.add("대상 앱 프로세스를 종료하고 처음부터 새로 시작합니다")
+        } catch (e: Exception) {
+            LogStore.add("앱 프로세스 종료 실패(그냥 처음 화면부터 엽니다): $e")
+        }
+        Thread.sleep(300)
+        return launch(pkg, fresh = true)
     }
 
     /**

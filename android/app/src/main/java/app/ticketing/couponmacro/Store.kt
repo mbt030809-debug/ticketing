@@ -42,6 +42,7 @@ object Store {
             .putString("swipeSpeed", f.swipeSpeed)
             .putString("afterScreenSec", f.afterScreenSec)
             .putString("afterScrollSec", f.afterScrollSec)
+            .putBoolean("coldStart", f.coldStart)
             .putString("warnSec", f.warnSec)
             .putBoolean("showDots", f.showDots)
             .commit()
@@ -149,6 +150,7 @@ object Store {
             swipeSpeed = p.getString("swipeSpeed", d.swipeSpeed).orEmpty().ifBlank { d.swipeSpeed },
             afterScreenSec = p.getString("afterScreenSec", d.afterScreenSec).orEmpty().ifBlank { d.afterScreenSec },
             afterScrollSec = p.getString("afterScrollSec", d.afterScrollSec).orEmpty().ifBlank { d.afterScrollSec },
+            coldStart = p.getBoolean("coldStart", d.coldStart),
             warnSec = p.getString("warnSec", d.warnSec).orEmpty().ifBlank { d.warnSec },
             showDots = p.getBoolean("showDots", d.showDots),
         )

@@ -36,6 +36,7 @@ class MainActivity : Activity() {
     private val fields = LinkedHashMap<String, EditText>()
     private val profileButtons = LinkedHashMap<String, Button>()
     private lateinit var launchCb: CheckBox
+    private lateinit var coldCb: CheckBox
     private lateinit var refreshCb: CheckBox
     private lateinit var dotsCb: CheckBox
     private lateinit var routeAtOpenCb: CheckBox
@@ -188,6 +189,8 @@ class MainActivity : Activity() {
             field(b, K_PKG, "대상 앱 패키지").onChanged { refreshAppLine() }
             launchCb = CheckBox(this).apply { text = "시작 시 앱 자동 실행 (끄면 직접 쿠폰 페이지에 가 있어야 함)" }
             b.addView(launchCb)
+            coldCb = CheckBox(this).apply { text = "앱을 새로 시작 (기록·재생 때 앱을 종료한 뒤 처음부터 열어 앱 상태/새로고침을 항상 같게)" }
+            b.addView(coldCb)
             field(b, K_STEPS, "이동 단계 (기록하면 자동 입력: 눌렀던 위치 @0.50,0.90~간격ms. 글자로 적을 수도 있음. 앞에 ? 붙이면 없어도 진행)", lines = 3)
                 .onChanged { refreshRoute() }
             field(b, K_TARGETS, "받기 버튼 문구 (쿠폰 카드 안의 버튼)")
@@ -493,8 +496,8 @@ class MainActivity : Activity() {
             return
         }
         saveCurrent()
-        if (svc.startRecording(f(K_PKG).trim(), profile.id)) {
-            toast("대상 앱이 열립니다. 쿠폰 페이지까지 이동한 뒤 [■ 기록 끝]을 누르세요")
+        if (svc.startRecording(f(K_PKG).trim(), profile.id, coldCb.isChecked)) {
+            toast("대상 앱을 새로 시작합니다. 앱이 다 뜬 뒤 쿠폰 페이지까지 이동하고 [■ 기록 끝]을 누르세요")
         } else {
             toast("기록을 시작할 수 없습니다 (앱 실행 실패 또는 이미 기록 중)")
         }
@@ -727,7 +730,7 @@ class MainActivity : Activity() {
     private fun f(k: String) = fields.getValue(k).text.toString()
 
     private fun readForm() = FormState(
-        name = profile.label, pkg = f(K_PKG).trim(), launchApp = launchCb.isChecked,
+        name = profile.label, pkg = f(K_PKG).trim(), launchApp = launchCb.isChecked, coldStart = coldCb.isChecked,
         openAt = "", leadMs = f(K_LEAD), intervalMs = f(K_INTERVAL),
         maxAttempts = f(K_ATTEMPTS), resultWaitSec = f(K_WAIT),
         steps = f(K_STEPS), popups = f(K_POPUPS), targets = f(K_TARGETS), coupons = f(K_COUPONS),
@@ -744,6 +747,7 @@ class MainActivity : Activity() {
         try {
         fields.getValue(K_PKG).setText(s.pkg)
         launchCb.isChecked = s.launchApp
+        coldCb.isChecked = s.coldStart
         fields.getValue(K_LEAD).setText(s.leadMs)
         fields.getValue(K_INTERVAL).setText(s.intervalMs)
         fields.getValue(K_ATTEMPTS).setText(s.maxAttempts)

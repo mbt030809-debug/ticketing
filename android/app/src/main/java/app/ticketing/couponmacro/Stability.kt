@@ -46,6 +46,9 @@ object Settle {
         return if (capAtMs == null) w else minOf(w, (capAtMs - nowMs).coerceAtLeast(0L))
     }
 
+    /** 앱을 새로 시작(홈으로 보내기 + 프로세스 종료)하는 데 드는 준비 시간(ms): 앱 실행 시각을 이만큼 앞당긴다 */
+    const val COLD_PREP_MS = 1_000L
+
     /** 마지막 이동 단계 뒤(쿠폰 화면이 뜨기 전) 최소 대기 */
     const val LAST_STEP_MIN_MS = 400L
 

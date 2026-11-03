@@ -108,6 +108,8 @@ data class Job(
     val afterScreenMs: Long = Settle.AFTER_SCREEN_MS,
     /** 경로의 스크롤이 끝난 뒤 다음 동작까지 기다리는 시간(ms) — 기본 0: 스크롤 직후 바로 누른다 */
     val afterScrollMs: Long = 0L,
+    /** 앱을 열 때 프로세스를 종료한 뒤 새로 시작할지(경로 기록 때와 같은 환경) */
+    val coldStart: Boolean = true,
 ) {
     val hasResultTexts: Boolean
         get() = successTexts.isNotEmpty() || alreadyTexts.isNotEmpty() || soldoutTexts.isNotEmpty()
@@ -325,6 +327,8 @@ data class FormState(
     val afterScreenSec: String = "0.5",
     /** 스크롤이 끝난 뒤 다음 동작까지 대기(초, 0~5, 기본 0 = 바로) */
     val afterScrollSec: String = "0",
+    /** 경로 기록/재생 때 대상 앱을 프로세스 종료 후 새로 시작 (켜면 기록할 때와 재생할 때 앱 상태가 같다) */
+    val coldStart: Boolean = true,
 ) {
     /**
      * openAt 이 있으면 그 날짜/시각을, 없으면 켜진 회차(slots - slotsOff) 중 다음 오픈 시각을 계산한다.
@@ -380,6 +384,7 @@ data class FormState(
                 swipeSpeed = swipeX,
                 afterScreenMs = (afterSec * 1000).toLong(),
                 afterScrollMs = (scrollSec * 1000).toLong(),
+                coldStart = coldStart,
             ),
             null,
         )
