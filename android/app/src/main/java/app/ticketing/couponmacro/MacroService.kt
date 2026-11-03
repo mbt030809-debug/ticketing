@@ -949,6 +949,7 @@ class MacroService : AccessibilityService() {
 
     private fun runJob(job: Job, mode: Mode) {
         runningOpenAtMs = if (mode == Mode.LIVE) job.openAtMillis else 0L
+        screenMatchedAt = 0L
         dots = job.showDots
         acquireWakeLock(Flow.wakeLockMs(job, mode, System.currentTimeMillis()))
         setKeepScreenOn(true)
@@ -996,7 +997,11 @@ class MacroService : AccessibilityService() {
                 if (v == null) {
                     useRefs = false // 화면 캡처가 안 되는 기기/상태 — 이 실행은 시간 기준으로
                     cur = settleAfterStep(job, null, Settle.minWaitMs(s.delayMs, false), "이동 ${i + 1}/$n")
+                } else if (v == ScreenVerdict.MATCH) {
+                    holdAfterScreen(job.afterScreenMs) // 화면이 뜬 뒤 0.5초(설정) 지나서 누른다
                 }
+            } else if (useRefs && i == 0 && firstScreenChecked && route.waits[0]) {
+                holdAfterScreen(job.afterScreenMs) // 앱 첫 화면은 정각 전에 미리 확인했다 — 확인한 지 0.5초가 안 됐으면 그만큼만 더 기다림
             }
             // 첫 탭: 정각에 늦지 않도록 확인 없이 바로 누른다(앞에서 미리 확인해 둠). 기록은 누른 뒤에 남긴다
             val ok = runStep(job, s, if (s.optional) 1_500 else 10_000, assumeForeground = i == 0 && fastFirst)
@@ -1017,7 +1022,10 @@ class MacroService : AccessibilityService() {
             if (useRefs && last) {
                 val end = route.end
                 if (end != null) {
-                    if (awaitScreen(end, null, null, "쿠폰 화면", maxWait, route.grids.getOrNull(n - 1)) != null) continue
+                    if (awaitScreen(end, null, null, "쿠폰 화면", maxWait, route.grids.getOrNull(n - 1)) != null) {
+                        holdAfterScreen(job.afterScreenMs) // 쿠폰 화면이 뜬 뒤 0.5초(설정) 지나서 쿠폰 선택 시작
+                        continue
+                    }
                     useRefs = false
                 }
             }
@@ -1074,6 +1082,7 @@ class MacroService : AccessibilityService() {
                 ScreenVerdict.MATCH -> {
                     val s = w.last
                     LogStore.add("원하는 화면 확인($why): ${now - start}ms 대기 · 전체 ${pct(s?.global)} 누를 곳 주변 ${pct(s?.region)}")
+                    screenMatchedAt = now
                     return ScreenVerdict.MATCH
                 }
                 ScreenVerdict.TIMEOUT -> {
@@ -1980,6 +1989,19 @@ class MacroService : AccessibilityService() {
         )
         if (ok) done.await(durationMs + 800, TimeUnit.MILLISECONDS)
         return ok
+    }
+
+    /** 원하는 화면이 떴다고 마지막으로 확인한 시각(elapsedRealtime) — 그로부터 afterScreenMs 뒤에 누른다 */
+    @Volatile private var screenMatchedAt = 0L
+
+    /** 화면이 뜬 걸 확인한 뒤 ms 가 지나기까지 기다린다(이미 지났으면 바로). 뜨자마자 누르면 버튼이 아직 안 눌리는 경우 대비 */
+    private fun holdAfterScreen(ms: Long) {
+        if (ms <= 0) return
+        val wait = Settle.holdRemainingMs(screenMatchedAt, SystemClock.elapsedRealtime(), ms)
+        if (wait > 0) {
+            LogStore.add("화면이 뜬 뒤 ${wait}ms 더 기다렸다가 누릅니다 (설정 ${ms}ms)")
+            sleep(wait)
+        }
     }
 
     /** 마지막으로 동작(탭/스와이프)을 시스템에 보낸 시각(epoch ms) — 정각 대비 지연 확인용 */

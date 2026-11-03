@@ -31,6 +31,12 @@ object Settle {
     /** 최소 대기를 채운 뒤에도 화면이 계속 바뀌면 이만큼(ms) 더 기다려 보고 그대로 진행 */
     const val EXTRA_MS = 4_000L
 
+    /** 원하는 화면이 뜬 걸 확인한 뒤 클릭까지 기본 대기(ms): 뜨자마자 누르면 버튼이 아직 눌리지 않는 경우가 있어서 */
+    const val AFTER_SCREEN_MS = 500L
+
+    /** 화면 확인 시각(matchedAtMs) 기준으로 holdMs 가 지나기까지 남은 시간(ms, 0 이상) */
+    fun holdRemainingMs(matchedAtMs: Long, nowMs: Long, holdMs: Long): Long = (matchedAtMs + holdMs - nowMs).coerceAtLeast(0L)
+
     /** 마지막 이동 단계 뒤(쿠폰 화면이 뜨기 전) 최소 대기 */
     const val LAST_STEP_MIN_MS = 400L
 

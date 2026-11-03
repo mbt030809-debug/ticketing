@@ -104,6 +104,8 @@ data class Job(
     val launchLeadMs: Long = 5_000,
     /** 경로의 스와이프(스크롤) 재생 속도: 기록한 속도의 몇 배인지 */
     val swipeSpeed: Float = Gestures.DEFAULT_SWIPE_SPEED,
+    /** 원하는 화면이 뜬 걸 확인한 뒤 클릭까지 더 기다리는 시간(ms) — 뜨자마자 누르면 버튼이 아직 눌리지 않는 경우 대비 */
+    val afterScreenMs: Long = Settle.AFTER_SCREEN_MS,
 ) {
     val hasResultTexts: Boolean
         get() = successTexts.isNotEmpty() || alreadyTexts.isNotEmpty() || soldoutTexts.isNotEmpty()
@@ -317,6 +319,8 @@ data class FormState(
     val launchLeadSec: String = "5",
     /** 스크롤(스와이프) 재생 속도 배율: 기록한 속도의 몇 배 (0.5~8, 기본 2) */
     val swipeSpeed: String = "2",
+    /** 원하는 화면이 뜬 뒤 클릭까지 대기(초, 0~5, 기본 0.5) */
+    val afterScreenSec: String = "0.5",
 ) {
     /**
      * openAt 이 있으면 그 날짜/시각을, 없으면 켜진 회차(slots - slotsOff) 중 다음 오픈 시각을 계산한다.
@@ -336,6 +340,7 @@ data class FormState(
         val waitSec = resultWaitSec.trim().toDoubleOrNull()?.takeIf { it >= 0 } ?: return Parsed(null, "결과 대기(초) 는 숫자")
         val launchLead = launchLeadSec.trim().toDoubleOrNull()?.takeIf { it in 0.0..600.0 } ?: return Parsed(null, "앱 실행 시점(초)은 0~600 숫자")
         val swipeX = swipeSpeed.trim().toFloatOrNull()?.takeIf { it in 0.5f..8f } ?: return Parsed(null, "스크롤 속도 배율은 0.5~8 숫자")
+        val afterSec = afterScreenSec.trim().toDoubleOrNull()?.takeIf { it in 0.0..5.0 } ?: return Parsed(null, "화면이 뜬 뒤 대기(초)는 0~5 숫자")
         val openMs = when {
             openAt.isNotBlank() -> try {
                 Parse.openAt(openAt)
@@ -368,6 +373,7 @@ data class FormState(
                 routeAtOpen = routeAtOpen,
                 launchLeadMs = (launchLead * 1000).toLong(),
                 swipeSpeed = swipeX,
+                afterScreenMs = (afterSec * 1000).toLong(),
             ),
             null,
         )

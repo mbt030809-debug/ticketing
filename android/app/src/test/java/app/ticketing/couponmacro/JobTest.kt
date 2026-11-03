@@ -229,6 +229,17 @@ class JobTest {
     }
 
     @Test
+    fun afterScreenWaitDefaultsToHalfASecondAndMustBeInRange() {
+        val base = FormState(pkg = "a.b", targets = "x", coupons = "c")
+        assertEquals(500L, base.toJob(false).job!!.afterScreenMs)
+        assertEquals(1_200L, base.copy(afterScreenSec = "1.2").toJob(false).job!!.afterScreenMs)
+        assertEquals(0L, base.copy(afterScreenSec = "0").toJob(false).job!!.afterScreenMs)
+        assertNotNull(base.copy(afterScreenSec = "-1").toJob(false).error)
+        assertNotNull(base.copy(afterScreenSec = "6").toJob(false).error)
+        assertNotNull(base.copy(afterScreenSec = "abc").toJob(false).error)
+    }
+
+    @Test
     fun launchLeadMustBeBetweenZeroAndSixHundredSeconds() {
         val base = FormState(pkg = "a.b", targets = "x", coupons = "c")
         assertNotNull(base.copy(launchLeadSec = "-1").toJob(false).error)

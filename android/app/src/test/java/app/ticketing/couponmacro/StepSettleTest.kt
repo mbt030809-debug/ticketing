@@ -96,6 +96,17 @@ class StepSettleTest {
     }
 
     @Test
+    fun clickWaitsHalfASecondAfterTheScreenShowsUp() {
+        // 회귀: 화면이 뜨자마자 누르면 버튼이 아직 안 눌려서 클릭이 먹히지 않았다 -> 확인한 뒤 0.5초 지나서 누른다
+        assertEquals(500L, Settle.AFTER_SCREEN_MS)
+        assertEquals(500L, Settle.holdRemainingMs(matchedAtMs = 10_000, nowMs = 10_000, holdMs = 500)) // 방금 확인 -> 0.5초 더
+        assertEquals(200L, Settle.holdRemainingMs(10_000, 10_300, 500))                               // 0.3초 지났으면 0.2초만
+        assertEquals(0L, Settle.holdRemainingMs(10_000, 11_000, 500))                                 // 이미 지났으면 바로
+        assertEquals(0L, Settle.holdRemainingMs(0, 5_000, 500))                                       // 확인한 적 없음(옛 값)이면 기다리지 않음
+        assertEquals(0L, Settle.holdRemainingMs(10_000, 10_000, 0))                                   // 0초 설정 = 바로
+    }
+
+    @Test
     fun minimumWaitFollowsTheRecordedGapWithinBounds() {
         assertEquals(600L, Settle.minWaitMs(null, isLast = false))
         assertEquals(300L, Settle.minWaitMs(100, isLast = false))
