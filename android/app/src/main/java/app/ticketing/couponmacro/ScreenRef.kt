@@ -23,6 +23,10 @@ object ScreenRef {
     const val RELAXED = 0.70f
     const val RELAX_AFTER_MS = 3_000L
 
+    /** 아주 오래 기다려도 안 맞을 때(렉으로 느리게 뜨는 화면, 배너/타이머가 계속 바뀌는 화면)의 마지막 기준 */
+    const val VERY_RELAXED = 0.60f
+    const val VERY_RELAX_AFTER_MS = 10_000L
+
     /** 거의 똑같은 화면(전체 90%+, 누를 자리 주변 85%+)은 한 번만 봐도 인정 — 연속 2회 확인을 기다리지 않아 단계마다 약 0.4초 빠르다 */
     const val EXACT = 0.90f
     const val EXACT_REGION = 0.85f
@@ -30,11 +34,11 @@ object ScreenRef {
     /** 누른 곳 주변(가로 ±2칸, 세로 ±1칸)의 같은 칸 비율 */
     const val REGION = 0.75f
 
-    /** 이 시간을 넘기면 원하는 화면이 안 떠도 그대로 진행 */
-    const val MAX_WAIT_MS = 6_000L
-
-    /** 한 번 시간 초과(기록 때와 화면이 달라 비교가 잘 안 되는 상황)한 뒤의 단계들은 더 짧게만 기다린다 */
-    const val MAX_WAIT_AFTER_MISS_MS = 2_500L
+    /**
+     * 원하는 화면이 뜰 때까지 기다리는 최대 시간. 선착순은 서버 렉으로 화면이 한참 늦게 뜰 수 있고,
+     * 화면이 전환되기 전에 누르면 엉뚱한 곳이 눌리므로 충분히 길게(1분) 기다린다. 이 시간이 지나야 어쩔 수 없이 진행한다.
+     */
+    const val MAX_WAIT_MS = 60_000L
 
     /** 화면 캡처 최소 간격(시스템 제한 약 1/3초 — 걸리면 코드 3 으로 알려 주고 다시 시도한다) */
     const val MIN_SHOT_INTERVAL_MS = 330L
@@ -123,7 +127,7 @@ enum class ScreenVerdict { WAIT, MATCH, TIMEOUT }
  * 기록 때 화면(ref)이 지금 화면으로 나타나기를 기다리는 판정.
  *  - 거의 똑같으면(EXACT) 한 번만 봐도 '나타남' — 스크롤/전환이 끝나 기록 때와 똑같아진 화면
  *  - 그 정도는 아니면(STRICT 이상) 연속 두 번 맞아야 '나타남'(애니메이션이 지나가는 순간에 속지 않도록)
- *  - RELAX_AFTER_MS 넘게 안 맞으면 RELAXED 로 완화(배너가 계속 바뀌는 화면 대비)
+ *  - RELAX_AFTER_MS 넘게 안 맞으면 RELAXED, VERY_RELAX_AFTER_MS 넘으면 VERY_RELAXED 로 완화(배너가 계속 바뀌는 화면 대비)
  *  - 누른 곳 주변은 항상 REGION 이상 같아야 함
  *  - maxWaitMs 를 넘기면 TIMEOUT(그대로 진행)
  */
@@ -147,7 +151,11 @@ class ScreenWait(
             val s = ScreenRef.score(ref, cur, fx, fy)
             last = s
             if (s.global >= ScreenRef.EXACT && s.region >= ScreenRef.EXACT_REGION) return ScreenVerdict.MATCH
-            val need = if (elapsed >= ScreenRef.RELAX_AFTER_MS) ScreenRef.RELAXED else ScreenRef.STRICT
+            val need = when {
+                elapsed >= ScreenRef.VERY_RELAX_AFTER_MS -> ScreenRef.VERY_RELAXED
+                elapsed >= ScreenRef.RELAX_AFTER_MS -> ScreenRef.RELAXED
+                else -> ScreenRef.STRICT
+            }
             if (s.global >= need && s.region >= ScreenRef.REGION) streak++ else streak = 0
             if (streak >= 2) return ScreenVerdict.MATCH
         }
@@ -159,11 +167,11 @@ class ScreenWait(
 object RouteScreens {
     /**
      * i번째 단계를 누르기 전에 기록 때 화면이 뜰 때까지 기다릴지: 기준 화면이 있고 필수 단계이며, 앞 단계와 다른 화면일 때.
-     * 스와이프(스크롤)는 특정 버튼을 누르는 게 아니라서 화면을 기다리지 않고 바로 한다 — 스크롤 뒤의 화면은 다음 단계가 확인한다.
+     * 스크롤(스와이프)도 마찬가지로 그 화면이 뜬 뒤에 한다 — 화면이 아직 안 떴을 때 쓸면 동작이 헛돌아 이후 단계가 모두 어긋난다.
      */
     fun waitsBefore(steps: List<Step>, i: Int): Boolean {
         val s = steps.getOrNull(i) ?: return false
-        if (s.optional || s.isSwipe) return false
+        if (s.optional) return false
         val mine = ScreenRef.gridOf(s.ref) ?: return false
         val prev = if (i > 0) ScreenRef.gridOf(steps[i - 1].ref) else null
         return prev == null || !ScreenRef.sameScreen(prev, mine)

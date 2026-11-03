@@ -162,6 +162,41 @@ class ScreenWaitTest {
     }
 
     @Test
+    fun laggyScreenIsWaitedForNotTappedBlindly() {
+        // 선착순 렉: 화면이 한참 안 떠도(여기선 30초) 눌러 버리지 않고 계속 기다린다
+        val w = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
+        var t = 100L
+        while (t <= 30_000) {
+            assertEquals("t=$t", ScreenVerdict.WAIT, w.update(fakePage(6), t)) // 아직 이전/로딩 화면
+            t += 500
+        }
+        // 마침내 화면이 뜨면 바로 인정
+        assertEquals(ScreenVerdict.MATCH, w.update(ref, 30_600))
+        assertTrue("충분히 길게 기다려야 함", ScreenRef.MAX_WAIT_MS >= 60_000)
+    }
+
+    @Test
+    fun veryLooseMatchOnlyAfterVeryLongWait() {
+        // 65% 만 같은 화면(타이머/배너가 계속 바뀜): 10초 넘게 기다린 뒤에야 인정
+        // (누를 자리 주변은 같고, 나머지의 1/3 이 다름)
+        val cur = IntArray(ref.size) { i ->
+            val r = i / ScreenRef.COLS
+            val c = i % ScreenRef.COLS
+            val aroundTap = r in 19..21 && c in 10..14
+            if (!aroundTap && i % 3 == 0) (ref[i] + 100) % 256 else ref[i]
+        }
+        val s = ScreenRef.score(ref, cur, 0.5f, 0.5f)
+        assertTrue("테스트 화면이 65% 안팎이어야 함: ${s.global}", s.global in 0.6f..0.7f)
+        assertTrue(s.region >= ScreenRef.REGION)
+        val w = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
+        assertEquals(ScreenVerdict.WAIT, w.update(cur, 100))
+        assertEquals(ScreenVerdict.WAIT, w.update(cur, ScreenRef.RELAX_AFTER_MS + 500))
+        assertEquals(ScreenVerdict.WAIT, w.update(cur, ScreenRef.VERY_RELAX_AFTER_MS - 500))
+        assertEquals(ScreenVerdict.WAIT, w.update(cur, ScreenRef.VERY_RELAX_AFTER_MS + 100))
+        assertEquals(ScreenVerdict.MATCH, w.update(cur, ScreenRef.VERY_RELAX_AFTER_MS + 500))
+    }
+
+    @Test
     fun tappedNeighborhoodMustAlwaysMatch() {
         // 전체는 거의 같아도 누를 자리 주변이 다르면(다른 버튼이 있음) 누르지 않는다
         val cur = ref.copyOf()
@@ -196,16 +231,18 @@ class RouteScreensTest {
     }
 
     @Test
-    fun scrollStepsDoNotWaitForAScreenButTheTapAfterThemDoes() {
-        // 스크롤은 바로 하고(화면을 기다리다 늦어지지 않음), 스크롤이 끝난 화면은 그 다음 탭이 확인한다
+    fun scrollStepsAlsoWaitForTheirScreenSoALagDoesNotMakeThemFizzle() {
+        // 렉으로 화면이 늦게 뜨는 중에 쓸면 스크롤이 헛돌아 이후 단계가 모두 어긋난다 -> 스크롤도 그 화면이 뜬 뒤에 한다
         val steps = listOf(
             Step("", false, 0.2f, 0.3f, null, ref = a),
             Step("", false, 0.5f, 0.7f, 800, 0.5f, 0.3f, 350, b),   // 스와이프
             Step("", false, 0.5f, 0.6f, 900, ref = a),              // 스크롤 뒤 화면에서 누르기
+            Step("", true, 0.5f, 0.7f, 800, 0.5f, 0.3f, 350, b),    // 없어도 되는 스크롤은 기다리지 않음
         )
         assertTrue(RouteScreens.waitsBefore(steps, 0))
-        assertFalse(RouteScreens.waitsBefore(steps, 1))
+        assertTrue(RouteScreens.waitsBefore(steps, 1))
         assertTrue(RouteScreens.waitsBefore(steps, 2))
+        assertFalse(RouteScreens.waitsBefore(steps, 3))
     }
 
     @Test

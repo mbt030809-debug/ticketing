@@ -146,6 +146,23 @@ class MacroService : AccessibilityService() {
     /** 정각 첫 탭을 늦추지 않으려고 미리 열어 둔 상태(첫 동작이 끝나면 닫는다) */
     @Volatile private var guardHeld = false
 
+    /** 통과 설정이 입력 시스템에 닿을 때까지 기다리는 시간. 잠금 창이 매크로 동작을 가로채면 늘린다 */
+    @Volatile private var guardSettleMs = 70L
+
+    /** 이 기기에서 잠금 창이 매크로 동작을 계속 가로채 잠금을 포기했는지(이 실행 동안) */
+    @Volatile private var guardDropped = false
+
+    /** 지금 보내는 중인 매크로 동작(시작점/끝점/유효 시각) — 잠금 창이나 긴급 정지 버튼에 이 동작이 닿았는지 알아보는 용도 */
+    private class MacroTouch(val x1: Float, val y1: Float, val x2: Float, val y2: Float, val untilMs: Long)
+
+    @Volatile private var macroTouch: MacroTouch? = null
+    @Volatile private var guardLeaked = false
+
+    private fun noteGuardTouch(x: Float, y: Float) {
+        val mt = macroTouch ?: return
+        if (SystemClock.elapsedRealtime() <= mt.untilMs && hypot(x - mt.x1, y - mt.y1) <= 60f) guardLeaked = true
+    }
+
     private fun guardFlags(pass: Boolean) =
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             (if (pass) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0)
@@ -160,12 +177,17 @@ class MacroService : AccessibilityService() {
         passCount.set(0)
         stopPass = false
         guardHeld = false
+        guardDropped = false
         main.post {
             if (!guardOn || guardView != null) return@post
             try {
                 val wm = getSystemService(WINDOW_SERVICE) as WindowManager
                 val v = View(this)
-                v.setOnTouchListener { _, _ -> true } // 모든 터치를 먹는다
+                v.setOnTouchListener { _, ev ->
+                    // 모든 터치를 먹는다. 단, 매크로가 보낸 동작이 여기 닿았다면(통과 설정이 늦음) 기록해 두었다가 다시 보낸다
+                    if (ev.actionMasked == MotionEvent.ACTION_DOWN) noteGuardTouch(ev.rawX, ev.rawY)
+                    true
+                }
                 val glp = WindowManager.LayoutParams(
                     WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.MATCH_PARENT,
@@ -187,6 +209,16 @@ class MacroService : AccessibilityService() {
                     }
                     setPadding(dp(14), 0, dp(14), 0)
                     setOnClickListener {
+                        // 매크로가 보낸 탭이 이 버튼에 닿은 거라면(사용자가 누른 게 아님) 무시하고 그 동작을 다시 보내게 한다
+                        val mt = macroTouch
+                        if (mt != null && SystemClock.elapsedRealtime() <= mt.untilMs) {
+                            val dm = resources.displayMetrics
+                            if (RunGuard.stopZone(dm.widthPixels, dm.heightPixels, dm.density).touches(mt.x1, mt.y1, mt.x2, mt.y2, 16 * dm.density)) {
+                                guardLeaked = true
+                                LogStore.add("매크로 동작이 긴급 정지 버튼에 닿아 무시했습니다")
+                                return@setOnClickListener
+                            }
+                        }
                         LogStore.add("긴급 정지 버튼 — 매크로를 멈춥니다")
                         cancel()
                         notifyResult("긴급 정지", "매크로를 멈췄습니다 (예약이 켜져 있으면 다음 회차는 계속됩니다 — 끄려면 앱에서 [예약 중지])")
@@ -213,9 +245,27 @@ class MacroService : AccessibilityService() {
         }
     }
 
+    /** 잠금 창만 없앤다(긴급 정지 버튼은 유지): 잠금 창이 매크로 동작을 계속 가로채는 기기에서 매크로를 우선하기 위해 */
+    private fun dropGuardWindow() {
+        guardDropped = true
+        passCount.set(0)
+        stopPass = false
+        main.post {
+            try {
+                val v = guardView
+                if (v != null) (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(v)
+            } catch (_: Exception) {
+            }
+            guardView = null
+            guardLp = null
+        }
+    }
+
     private fun hideRunGuard() {
         guardOn = false
         guardHeld = false
+        guardDropped = false
+        macroTouch = null
         passCount.set(0)
         stopPass = false
         main.post {
@@ -259,7 +309,7 @@ class MacroService : AccessibilityService() {
 
     /** 동작을 보내기 전: 잠금 창이 그 동작을 가로채지 않도록 터치 통과로 바꾸고 반영될 때까지 잠깐 기다린다 */
     private fun acquireGuardPass(hitsStop: Boolean) {
-        if (!guardOn) return
+        if (!guardOn || guardDropped) return
         passCount.incrementAndGet()
         if (hitsStop) stopPass = true
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -275,11 +325,11 @@ class MacroService : AccessibilityService() {
             }
         }
         applied.await(150, TimeUnit.MILLISECONDS)
-        Thread.sleep(20) // 창 변경이 입력 시스템에 닿을 시간
+        Thread.sleep(guardSettleMs) // 창 변경이 입력 시스템에 닿을 시간(기기마다 달라 가로채임이 감지되면 늘린다)
     }
 
     private fun releaseGuardPass() {
-        if (!guardOn) return
+        if (!guardOn || guardDropped) return
         if (passCount.decrementAndGet() <= 0) {
             passCount.set(0)
             stopPass = false
@@ -289,7 +339,7 @@ class MacroService : AccessibilityService() {
 
     /** 정각 첫 동작 직전에 미리 통과 상태로 열어 둔다(정각에 창 설정을 바꾸느라 첫 탭이 늦어지지 않도록) */
     private fun holdGuardOpen(first: Step?) {
-        if (!guardOn || guardHeld) return
+        if (!guardOn || guardDropped || guardHeld) return
         val dm = resources.displayMetrics
         val fx = first?.hintX
         val fy = first?.hintY
@@ -919,13 +969,12 @@ class MacroService : AccessibilityService() {
     private fun replayRoute(
         job: Job, waitLoaded: Boolean, initial: PageSig? = null, firstScreenChecked: Boolean = false,
         route: RoutePlan = prepareRoute(job), fastFirst: Boolean = false, fire: Pair<Long, Long>? = null,
-        firstMissed: Boolean = false,
     ): Outcome? {
         var cur: PageSig? = initial // 없으면 첫 시간 기준 대기 때 처음 읽은 화면을 기준으로 삼는다(첫 탭 전에 화면 전체를 읽느라 늦추지 않음)
         val n = job.steps.size
         var useRefs = route.useRefs
-        // 기록 때와 화면이 달라(실제 오픈 순간의 화면은 연습 때와 다를 수 있음) 한 번 시간 초과했으면 이후 단계는 짧게만 기다린다
-        var maxWait = if (firstMissed) ScreenRef.MAX_WAIT_AFTER_MISS_MS else ScreenRef.MAX_WAIT_MS
+        // 선착순은 렉으로 화면이 늦게 뜰 수 있다: 화면이 전환돼 원하는 화면이 뜰 때까지 충분히(최대 1분) 기다린 뒤에 누른다
+        val maxWait = ScreenRef.MAX_WAIT_MS
         for ((i, s) in job.steps.withIndex()) {
             if (useRefs && !(i == 0 && firstScreenChecked) && route.waits[i]) {
                 val ref = route.grids[i]
@@ -933,8 +982,6 @@ class MacroService : AccessibilityService() {
                 if (v == null) {
                     useRefs = false // 화면 캡처가 안 되는 기기/상태 — 이 실행은 시간 기준으로
                     cur = settleAfterStep(job, null, Settle.minWaitMs(s.delayMs, false), "이동 ${i + 1}/$n")
-                } else if (v == ScreenVerdict.TIMEOUT) {
-                    maxWait = ScreenRef.MAX_WAIT_AFTER_MISS_MS
                 }
             }
             // 첫 탭: 정각에 늦지 않도록 확인 없이 바로 누른다(앞에서 미리 확인해 둠). 기록은 누른 뒤에 남긴다
@@ -1015,7 +1062,7 @@ class MacroService : AccessibilityService() {
                 }
                 ScreenVerdict.TIMEOUT -> {
                     val s = w.last
-                    LogStore.add("원하는 화면이 ${(now - start) / 1000.0}초 안에 안 떠서 그대로 진행($why) · 일치 전체 ${pct(s?.global)} 누를 곳 주변 ${pct(s?.region)}")
+                    LogStore.add("원하는 화면이 ${(now - start) / 1000}초가 지나도 안 떠서 어쩔 수 없이 진행($why) · 일치 전체 ${pct(s?.global)} 누를 곳 주변 ${pct(s?.region)}")
                     return ScreenVerdict.TIMEOUT
                 }
                 ScreenVerdict.WAIT -> if (now - lastLog >= 2_000) {
@@ -1077,7 +1124,7 @@ class MacroService : AccessibilityService() {
             }
             if (stable && nowMs < fireAt) {
                 // 정각 전에 이미 안정이 확인됐다 -> 더 읽지 않고(읽다가 정각을 넘기지 않도록) 정각까지 쉬었다가 바로 반환
-                if (fireAt - (System.currentTimeMillis() + offset) > 150) waitUntil(fireAt - 120, offset)
+                if (fireAt - (System.currentTimeMillis() + offset) > 300) waitUntil(fireAt - 260, offset)
                 beforeFire?.invoke()
                 waitUntil(fireAt, offset)
                 return last
@@ -1176,7 +1223,6 @@ class MacroService : AccessibilityService() {
         var start: PageSig? = null
         var firstChecked = false
         var fastFirst = false
-        var firstMissed = false
         var route: RoutePlan? = null
         if (plan.replayRoute) {
             route = prepareRoute(job)
@@ -1184,9 +1230,7 @@ class MacroService : AccessibilityService() {
             val s0 = job.steps.firstOrNull()
             val g0 = route.grids.firstOrNull()
             if (s0 != null && route.useRefs && route.waits[0] && g0 != null) {
-                val v0 = awaitScreen(g0, s0.hintX, s0.hintY, "앱 첫 화면")
-                firstChecked = v0 != null
-                firstMissed = v0 == ScreenVerdict.TIMEOUT
+                firstChecked = awaitScreen(g0, s0.hintX, s0.hintY, "앱 첫 화면") != null
             }
             if (firstChecked) {
                 // 정각 0.3초 전에 대상 앱이 앞에 있는지만 가볍게 확인 -> 정각에는 확인 없이 바로 누름
@@ -1194,7 +1238,7 @@ class MacroService : AccessibilityService() {
                     waitUntil(fireAt - 300, offset)
                     fastFirst = targetRoot(job) != null
                 }
-                if (fireAt - (System.currentTimeMillis() + offset) > 150) waitUntil(fireAt - 120, offset)
+                if (fireAt - (System.currentTimeMillis() + offset) > 300) waitUntil(fireAt - 260, offset)
                 holdGuardOpen(job.steps.firstOrNull()) // 정각 첫 탭이 잠금 창에 막히지 않게 미리 통과 상태로
                 waitUntil(fireAt, offset)
             } else {
@@ -1207,7 +1251,7 @@ class MacroService : AccessibilityService() {
         if (route != null) {
             replayRoute(
                 job, waitLoaded = plan.waitLoadedBetweenSteps, initial = start, firstScreenChecked = firstChecked,
-                route = route, fastFirst = fastFirst, fire = fireAt to offset, firstMissed = firstMissed,
+                route = route, fastFirst = fastFirst, fire = fireAt to offset,
             )?.let { return it }
         } else {
             LogStore.add(if (mode == Mode.LIVE) "정각 — 쿠폰 선택 시작" else "앱 실행 후 ${(fireAt - launchAt) / 1000.0}초 경과")
@@ -1835,50 +1879,58 @@ class MacroService : AccessibilityService() {
             val s = segs[0]
             return gestureAndWait(s.x1, s.y1, s.x2, s.y2, s.durMs)
         }
-        val ownsPass = guardOn && !guardHeld
-        if (ownsPass) {
-            val dm = resources.displayMetrics
-            val zone = RunGuard.stopZone(dm.widthPixels, dm.heightPixels, dm.density)
-            val hits = segs.any { zone.touches(it.x1, it.y1, it.x2, it.y2, 8 * dm.density) }
-            acquireGuardPass(hits)
-        }
-        val finished = CountDownLatch(1)
-        var okAll = true
-        fun send(i: Int, prev: GestureDescription.StrokeDescription?) {
-            val s = segs[i]
-            val last = i == segs.lastIndex
-            val path = Path().apply {
-                moveTo(s.x1, s.y1)
-                lineTo(s.x2, s.y2)
-            }
-            val stroke = if (prev == null) {
-                GestureDescription.StrokeDescription(path, 0, s.durMs, !last)
-            } else {
-                prev.continueStroke(path, 0, s.durMs, !last)
-            }
-            val cb = object : AccessibilityService.GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) {
-                    if (last) finished.countDown() else send(i + 1, stroke)
+        val dm = resources.displayMetrics
+        val zone = RunGuard.stopZone(dm.widthPixels, dm.heightPixels, dm.density)
+        val hits = segs.any { zone.touches(it.x1, it.y1, it.x2, it.y2, 8 * dm.density) }
+        val total = segs.sumOf { it.durMs }
+        var attempt = 0
+        while (true) {
+            val ownsPass = guardOn && !guardHeld && !guardDropped
+            if (ownsPass) acquireGuardPass(hits)
+            guardLeaked = false
+            macroTouch = MacroTouch(segs.first().x1, segs.first().y1, segs.last().x2, segs.last().y2, SystemClock.elapsedRealtime() + total + 300)
+            val finished = CountDownLatch(1)
+            var okAll = true
+            fun send(i: Int, prev: GestureDescription.StrokeDescription?) {
+                val s = segs[i]
+                val last = i == segs.lastIndex
+                val path = Path().apply {
+                    moveTo(s.x1, s.y1)
+                    lineTo(s.x2, s.y2)
                 }
+                val stroke = if (prev == null) {
+                    GestureDescription.StrokeDescription(path, 0, s.durMs, !last)
+                } else {
+                    prev.continueStroke(path, 0, s.durMs, !last)
+                }
+                val cb = object : AccessibilityService.GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        if (last) finished.countDown() else send(i + 1, stroke)
+                    }
 
-                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        okAll = false
+                        finished.countDown()
+                    }
+                }
+                if (i == 0) lastDispatchAtMs = System.currentTimeMillis()
+                if (!dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), cb, null)) {
                     okAll = false
                     finished.countDown()
                 }
             }
-            if (i == 0) lastDispatchAtMs = System.currentTimeMillis()
-            if (!dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), cb, null)) {
-                okAll = false
-                finished.countDown()
+            try {
+                send(0, null)
+                finished.await(total + 2_000, TimeUnit.MILLISECONDS)
+                if (guardOn) Thread.sleep(25) // 가로채기 감지가 끝날 시간
+            } finally {
+                macroTouch = null
+                if (ownsPass) releaseGuardPass()
             }
+            if (!guardLeaked || !guardOn || guardDropped) return okAll
+            attempt++
+            if (!onGuardLeak(attempt)) return okAll
         }
-        try {
-            send(0, null)
-            finished.await(segs.sumOf { it.durMs } + 2_000, TimeUnit.MILLISECONDS)
-        } finally {
-            if (ownsPass) releaseGuardPass()
-        }
-        return okAll
     }
 
     /** 동작을 보내고 끝날 때까지(최대 길이+0.8초) 기다린다. 못 보내면 false */
@@ -1909,32 +1961,71 @@ class MacroService : AccessibilityService() {
         val g = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(p, 0, durationMs))
             .build()
-        // 실행 중 화면 잠금이 켜져 있으면, 이 동작을 보내는 동안만 잠금 창이 터치를 통과시킨다(미리 열어 둔 경우는 그대로)
-        if (guardOn && !guardHeld) {
-            val dm = resources.displayMetrics
-            val hits = RunGuard.stopZone(dm.widthPixels, dm.heightPixels, dm.density).touches(x1, y1, x2, y2, 8 * dm.density)
-            acquireGuardPass(hits)
-            val released = AtomicBoolean(false)
-            val release = { if (released.compareAndSet(false, true)) releaseGuardPass() }
-            val wrapped = object : AccessibilityService.GestureResultCallback() {
+        // 실행 중 화면 잠금(사용자 터치 차단)이 없거나 메인 스레드면 그냥 보낸다
+        if (!guardOn || guardDropped || Looper.myLooper() == Looper.getMainLooper()) {
+            lastDispatchAtMs = System.currentTimeMillis()
+            return dispatchGesture(g, callback, null)
+        }
+        // 잠금이 켜져 있으면: 이 동작을 보내는 동안만 잠금 창이 터치를 통과시키고, 끝나면 되돌린다.
+        // 그런데 창 설정이 입력 시스템에 닿기 전에 동작이 먼저 도착하면 잠금 창이 매크로 동작을 먹어 버린다 -> 먹혔는지 확인하고
+        // 통과 대기 시간을 늘려 다시 보낸다. 그래도 안 되면 잠금을 포기하고 매크로를 우선한다(긴급 정지 버튼은 유지).
+        val dm = resources.displayMetrics
+        val hits = RunGuard.stopZone(dm.widthPixels, dm.heightPixels, dm.density).touches(x1, y1, x2, y2, 8 * dm.density)
+        var attempt = 0
+        while (true) {
+            val own = !guardHeld && !guardDropped
+            if (own) acquireGuardPass(hits)
+            guardLeaked = false
+            macroTouch = MacroTouch(x1, y1, x2, y2, SystemClock.elapsedRealtime() + durationMs + 300)
+            val done = CountDownLatch(1)
+            var completed = false
+            val cb = object : AccessibilityService.GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
-                    release()
-                    callback?.onCompleted(gestureDescription)
+                    completed = true
+                    done.countDown()
                 }
 
                 override fun onCancelled(gestureDescription: GestureDescription?) {
-                    release()
-                    callback?.onCancelled(gestureDescription)
+                    done.countDown()
                 }
             }
-            main.postDelayed({ release() }, durationMs + 1_500) // 콜백이 안 와도 잠금이 영원히 풀려 있지 않게
             lastDispatchAtMs = System.currentTimeMillis()
-            val ok = dispatchGesture(g, wrapped, null)
-            if (!ok) release()
-            return ok
+            val ok = dispatchGesture(g, cb, null)
+            if (ok) {
+                done.await(durationMs + 800, TimeUnit.MILLISECONDS)
+                Thread.sleep(25) // 가로채기 감지(터치 이벤트 전달)가 끝날 시간
+            }
+            macroTouch = null
+            if (own) releaseGuardPass()
+            if (!ok) return false
+            if (!guardLeaked || !guardOn || guardDropped) {
+                if (completed) callback?.onCompleted(g) else callback?.onCancelled(g)
+                return true
+            }
+            attempt++
+            if (!onGuardLeak(attempt)) {
+                callback?.onCompleted(g)
+                return true
+            }
         }
-        lastDispatchAtMs = System.currentTimeMillis()
-        return dispatchGesture(g, callback, null)
+    }
+
+    /**
+     * 잠금 창이 매크로 동작을 먹었을 때: 통과 대기 시간을 늘리고, 거듭되면 잠금을 포기한다.
+     * @return true 면 같은 동작을 다시 보낸다 / false 면 더 시도하지 않는다
+     */
+    private fun onGuardLeak(attempt: Int): Boolean {
+        guardSettleMs = minOf(guardSettleMs + 50, 250L)
+        LogStore.add("잠금 창이 매크로 동작을 가로챘습니다 → 통과 대기를 ${guardSettleMs}ms 로 늘려 다시 보냅니다 (${attempt}회)")
+        if (guardHeld) {
+            guardHeld = false
+            releaseGuardPass()
+        }
+        if (attempt >= 2) {
+            LogStore.add("이 기기에서는 터치 잠금이 매크로 동작과 함께 동작하지 않아 잠금을 풀고 진행합니다 (긴급 정지 버튼은 유지)")
+            dropGuardWindow()
+        }
+        return attempt < 3
     }
 
     /**
