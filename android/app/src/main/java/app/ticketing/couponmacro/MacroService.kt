@@ -1355,7 +1355,8 @@ class MacroService : AccessibilityService() {
      * 경로 이동은 정각에 시작하므로 단계마다 오래 기다리지 않고, 마지막에만 짧게 화면 로딩 완료를 확인한 뒤 쿠폰을 누른다.
      * 테스트(즉시 실행/찾기만)는 job 의 오픈 시각이 '지금 + launchLeadMs' 로 바뀐 채 같은 흐름을 탄다(Flow.rehearsal).
      */
-    private fun executeAtOpen(job: Job, offset: Long, mode: Mode = Mode.LIVE): Outcome {
+    private fun executeAtOpen(job: Job, offset0: Long, mode: Mode = Mode.LIVE): Outcome {
+        var offset = offset0
         val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.KOREA)
         val plan = Flow.plan(job, mode)
         val hasRoute = plan.replayRoute
@@ -1374,6 +1375,16 @@ class MacroService : AccessibilityService() {
                 if (hasRoute) " · 경로 ${job.steps.size}단계" else " · 기록한 경로 없음(앱을 새로 시작한 첫 화면에서 시작)",
         )
 
+        // 예약을 몇 시간 전에 눌렀다면 시작 때 잰 시각 보정값이 오래됐다 -> 앱 시작 직전(약 25초 전)에 다시 잰다
+        if (mode == Mode.LIVE && launchAt - Settle.COLD_PREP_MS - (System.currentTimeMillis() + offset) > 40_000) {
+            waitUntil(launchAt - Settle.COLD_PREP_MS - 25_000, offset)
+            val fresh = Ntp.measure()
+            if (fresh != null) {
+                LogStore.add("NTP 다시 잼: ${offset}ms → ${fresh.offsetMs}ms (왕복 ${fresh.rttMs}ms → 오차 약 ±${fresh.rttMs / 2}ms)")
+                offset = fresh.offsetMs
+                runOffset = offset
+            }
+        }
         // 앱을 새로 시작하려면 준비(홈으로 보내기 + 프로세스 종료)가 필요해서 그만큼 앞당겨 시작한다
         waitUntil(launchAt - Settle.COLD_PREP_MS, offset)
         showRunGuard() // 앱을 여는 순간부터 사용자 터치 차단 + 긴급 정지 버튼
@@ -1442,12 +1453,12 @@ class MacroService : AccessibilityService() {
         fractionLogged.clear()
         var offset = 0L
         if (mode == Mode.LIVE) {
-            val o = Ntp.offsetMs()
+            val o = Ntp.measure()
             if (o == null) {
                 LogStore.add("NTP 실패 → 기기 시계 그대로 사용")
             } else {
-                offset = o
-                LogStore.add("NTP 오프셋 ${o}ms")
+                offset = o.offsetMs
+                LogStore.add("NTP 오프셋 ${o.offsetMs}ms (왕복 ${o.rttMs}ms → 오차 약 ±${o.rttMs / 2}ms) — 서버: time.google.com")
             }
             runOffset = offset
             if (job.openAtMillis - (System.currentTimeMillis() + offset) < -Schedule.GRACE_MS) {
