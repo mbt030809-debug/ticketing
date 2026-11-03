@@ -152,6 +152,9 @@ class MacroService : AccessibilityService() {
     /** 이 기기에서 잠금 창이 매크로 동작을 계속 가로채 잠금을 포기했는지(이 실행 동안) */
     @Volatile private var guardDropped = false
 
+    /** 이미지 쿠폰 연타 동안 터치 잠금을 풀어 둔 상태(동작마다 창 설정을 바꾸지 않는다) */
+    @Volatile private var guardOpenAll = false
+
     /** 지금 보내는 중인 매크로 동작(시작점/끝점/유효 시각) — 잠금 창이나 긴급 정지 버튼에 이 동작이 닿았는지 알아보는 용도 */
     private class MacroTouch(val x1: Float, val y1: Float, val x2: Float, val y2: Float, val untilMs: Long)
 
@@ -178,6 +181,7 @@ class MacroService : AccessibilityService() {
         stopPass = false
         guardHeld = false
         guardDropped = false
+        guardOpenAll = false
         main.post {
             if (!guardOn || guardView != null) return@post
             try {
@@ -265,6 +269,7 @@ class MacroService : AccessibilityService() {
         guardOn = false
         guardHeld = false
         guardDropped = false
+        guardOpenAll = false
         macroTouch = null
         passCount.set(0)
         stopPass = false
@@ -409,7 +414,13 @@ class MacroService : AccessibilityService() {
 
     private fun finishRecording() {
         // 기록을 끝낸 순간의 화면(= 쿠폰을 고를 화면)도 기준으로 저장: 재생 때 이 화면이 뜬 뒤에 쿠폰을 고른다
-        val end = captureGrid()?.takeIf { ScreenRef.informative(it) }?.let { ScreenRef.encode(it) }
+        // (캡처가 예외로 실패해도 기록 화면이 남아 터치를 계속 막는 일이 없도록 반드시 정리한다)
+        val end = try {
+            captureGrid()?.takeIf { ScreenRef.informative(it) }?.let { ScreenRef.encode(it) }
+        } catch (e: Exception) {
+            LogStore.add("끝 화면 캡처 실패: $e")
+            null
+        }
         recordPkg = null
         hideRecordOverlay()
         val dm = resources.displayMetrics
@@ -472,19 +483,22 @@ class MacroService : AccessibilityService() {
         )
         main.post { recordButton?.text = "■ 기록 끝 (${n}단계)" }
 
-        // 같은 동작을 아래 앱에 전달하는 동안만 투명 창이 터치를 통과시킨다
+        // 같은 동작을 아래 앱에 전달하는 동안만 투명 창이 터치를 통과시킨다 (무슨 일이 있어도 끝나면 다시 터치를 받도록 복구)
         setProxyTouchable(false)
-        val done = CountDownLatch(1)
-        val ok = gesture(
-            g.x1, g.y1, g.x2, g.y2, g.durMs,
-            object : AccessibilityService.GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) = done.countDown()
-                override fun onCancelled(gestureDescription: GestureDescription?) = done.countDown()
-            },
-        )
-        if (ok) done.await(g.durMs + 1_500, TimeUnit.MILLISECONDS) else LogStore.add("기록: 동작을 앱에 전달하지 못했습니다")
-        Thread.sleep(60)
-        setProxyTouchable(true)
+        try {
+            val done = CountDownLatch(1)
+            val ok = gesture(
+                g.x1, g.y1, g.x2, g.y2, g.durMs,
+                object : AccessibilityService.GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) = done.countDown()
+                    override fun onCancelled(gestureDescription: GestureDescription?) = done.countDown()
+                },
+            )
+            if (ok) done.await(g.durMs + 1_500, TimeUnit.MILLISECONDS) else LogStore.add("기록: 동작을 앱에 전달하지 못했습니다")
+            Thread.sleep(60)
+        } finally {
+            setProxyTouchable(true)
+        }
     }
 
     /** (x, y) 위치에 있는 팝업 닫기 류 버튼의 글자. 아니면 null */
@@ -1365,6 +1379,25 @@ class MacroService : AccessibilityService() {
      * 모든 쿠폰이 성공/이미 받음/소진 중 하나로 정리되면 종료.
      */
     private fun clickLoop(job: Job, mode: Mode): Outcome {
+        // 위치(이미지) 쿠폰은 탭을 빠르게 연타해야 해서, 탭마다 잠금 창 설정을 바꾸면 느려진다 -> 쿠폰 선택 동안만 터치 잠금을 풀어 둔다
+        // (글자 쿠폰은 접근성 클릭이라 잠금과 무관. 긴급 정지 버튼은 그대로)
+        val openForTaps = guardOn && !guardDropped && job.coupons.any { PosTarget.isPos(it) }
+        if (openForTaps) {
+            guardOpenAll = true
+            acquireGuardPass(false)
+            LogStore.add("이미지 쿠폰을 빠르게 누르는 동안은 터치 잠금을 잠시 풀어 둡니다 (긴급 정지 버튼은 그대로)")
+        }
+        try {
+            return clickLoopInner(job, mode)
+        } finally {
+            if (openForTaps && guardOpenAll) {
+                guardOpenAll = false
+                releaseGuardPass()
+            }
+        }
+    }
+
+    private fun clickLoopInner(job: Job, mode: Mode): Outcome {
         val rules = rulesFor(job)
         val done = LinkedHashMap<String, String>()   // 쿠폰 문구 -> success|already|soldout|clicked|dry_run
         val clicked = HashSet<String>()
@@ -1964,7 +1997,7 @@ class MacroService : AccessibilityService() {
             .addStroke(GestureDescription.StrokeDescription(p, 0, durationMs))
             .build()
         // 실행 중 화면 잠금(사용자 터치 차단)이 없거나 메인 스레드면 그냥 보낸다
-        if (!guardOn || guardDropped || Looper.myLooper() == Looper.getMainLooper()) {
+        if (!guardOn || guardDropped || guardOpenAll || Looper.myLooper() == Looper.getMainLooper()) {
             lastDispatchAtMs = System.currentTimeMillis()
             return dispatchGesture(g, callback, null)
         }
