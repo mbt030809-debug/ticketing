@@ -3,10 +3,21 @@ package app.ticketing.couponmacro
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class GesturesTest {
     private val slop = 16f
+
+    @Test
+    fun replayedScrollIsFasterThanRecordedByTheSpeedSetting() {
+        assertEquals(300L, Gestures.replayDurationMs(600, 2f))      // 기본 2배: 기록의 절반 시간
+        assertEquals(600L, Gestures.replayDurationMs(600, 1f))      // 1배 = 기록한 속도 그대로
+        assertEquals(150L, Gestures.replayDurationMs(null, 2f))     // 기록이 없으면 0.3초 기준
+        assertEquals(80L, Gestures.replayDurationMs(100, 4f))       // 너무 짧아지지 않게
+        assertEquals(2_000L, Gestures.replayDurationMs(5_000, 1f))  // 너무 길어지지 않게
+        assertTrue(Gestures.replayDurationMs(800, Gestures.DEFAULT_SWIPE_SPEED) < 800)
+    }
 
     @Test
     fun emptyTouchIsIgnored() {

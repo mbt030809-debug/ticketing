@@ -740,16 +740,22 @@ class MacroService : AccessibilityService() {
     private fun replayRoute(
         job: Job, waitLoaded: Boolean, initial: PageSig? = null, firstScreenChecked: Boolean = false,
         route: RoutePlan = prepareRoute(job), fastFirst: Boolean = false, fire: Pair<Long, Long>? = null,
+        firstMissed: Boolean = false,
     ): Outcome? {
         var cur: PageSig? = initial // 없으면 첫 시간 기준 대기 때 처음 읽은 화면을 기준으로 삼는다(첫 탭 전에 화면 전체를 읽느라 늦추지 않음)
         val n = job.steps.size
         var useRefs = route.useRefs
+        // 기록 때와 화면이 달라(실제 오픈 순간의 화면은 연습 때와 다를 수 있음) 한 번 시간 초과했으면 이후 단계는 짧게만 기다린다
+        var maxWait = if (firstMissed) ScreenRef.MAX_WAIT_AFTER_MISS_MS else ScreenRef.MAX_WAIT_MS
         for ((i, s) in job.steps.withIndex()) {
             if (useRefs && !(i == 0 && firstScreenChecked) && route.waits[i]) {
                 val ref = route.grids[i]
-                if (ref == null || !awaitScreen(ref, s.hintX, s.hintY, "이동 ${i + 1}/$n")) {
+                val v = if (ref == null) null else awaitScreen(ref, s.hintX, s.hintY, "이동 ${i + 1}/$n", maxWait)
+                if (v == null) {
                     useRefs = false // 화면 캡처가 안 되는 기기/상태 — 이 실행은 시간 기준으로
                     cur = settleAfterStep(job, null, Settle.minWaitMs(s.delayMs, false), "이동 ${i + 1}/$n")
+                } else if (v == ScreenVerdict.TIMEOUT) {
+                    maxWait = ScreenRef.MAX_WAIT_AFTER_MISS_MS
                 }
             }
             // 첫 탭: 정각에 늦지 않도록 확인 없이 바로 누른다(앞에서 미리 확인해 둠). 기록은 누른 뒤에 남긴다
@@ -770,7 +776,7 @@ class MacroService : AccessibilityService() {
             if (useRefs && last) {
                 val end = route.end
                 if (end != null) {
-                    if (awaitScreen(end, null, null, "쿠폰 화면")) continue
+                    if (awaitScreen(end, null, null, "쿠폰 화면", maxWait) != null) continue
                     useRefs = false
                 }
             }
@@ -800,11 +806,11 @@ class MacroService : AccessibilityService() {
 
     /**
      * 지금 화면이 기록 때 화면(ref)과 같아 보일 때까지 기다린다 (ScreenWait 규칙: 연속 2회 일치, 최대 9초).
-     * @return true: 화면이 나타났거나 시간이 다 돼 그대로 진행 / false: 화면 캡처를 할 수 없음(시간 기준으로 전환 필요)
+     * @return MATCH: 화면이 나타남 / TIMEOUT: 시간이 다 돼 그대로 진행 / null: 화면 캡처를 할 수 없음(시간 기준으로 전환 필요)
      */
-    private fun awaitScreen(ref: IntArray, fx: Float?, fy: Float?, why: String): Boolean {
+    private fun awaitScreen(ref: IntArray, fx: Float?, fy: Float?, why: String, maxWaitMs: Long = ScreenRef.MAX_WAIT_MS): ScreenVerdict? {
         val start = SystemClock.elapsedRealtime()
-        val w = ScreenWait(ref, fx, fy, start)
+        val w = ScreenWait(ref, fx, fy, start, maxWaitMs)
         var fails = 0
         var lastLog = start
         fun pct(v: Float?) = "${((v ?: 0f) * 100).toInt()}%"
@@ -815,7 +821,7 @@ class MacroService : AccessibilityService() {
             if (cur == null) {
                 if (++fails >= 3) {
                     LogStore.add("화면 캡처를 못 해 시간 기준으로 진행($why, 코드 $lastShotFail)")
-                    return false
+                    return null
                 }
             } else {
                 fails = 0
@@ -825,12 +831,12 @@ class MacroService : AccessibilityService() {
                 ScreenVerdict.MATCH -> {
                     val s = w.last
                     LogStore.add("원하는 화면 확인($why): ${now - start}ms 대기 · 전체 ${pct(s?.global)} 누를 곳 주변 ${pct(s?.region)}")
-                    return true
+                    return ScreenVerdict.MATCH
                 }
                 ScreenVerdict.TIMEOUT -> {
                     val s = w.last
-                    LogStore.add("원하는 화면이 ${(now - start) / 1000}초 안에 안 떠서 그대로 진행($why) · 일치 전체 ${pct(s?.global)} 누를 곳 주변 ${pct(s?.region)}")
-                    return true
+                    LogStore.add("원하는 화면이 ${(now - start) / 1000.0}초 안에 안 떠서 그대로 진행($why) · 일치 전체 ${pct(s?.global)} 누를 곳 주변 ${pct(s?.region)}")
+                    return ScreenVerdict.TIMEOUT
                 }
                 ScreenVerdict.WAIT -> if (now - lastLog >= 2_000) {
                     lastLog = now
@@ -926,8 +932,13 @@ class MacroService : AccessibilityService() {
             val y = fy * dm.heightPixels
             val ex = (s.endX ?: fx) * dm.widthPixels
             val ey = (s.endY ?: fy) * dm.heightPixels
-            val ok = gesture(x, y, ex, ey, s.durMs ?: if (s.isSwipe) 300L else Gestures.TAP_MS)
+            val dur = if (s.isSwipe) Gestures.replayDurationMs(s.durMs, job.swipeSpeed) else (s.durMs ?: Gestures.TAP_MS)
+            // 동작이 끝난 뒤에 돌아온다: 끝나기 전에 다음 동작을 보내면 앞 동작(스크롤 등)이 중간에 취소되기 때문
+            val ok = gestureAndWait(x, y, ex, ey, dur)
             if (ok) showDot(x, y, Color.RED)
+            if (s.isSwipe) {
+                LogStore.add("스크롤 ${if (ok) "실행" else "실패"}: ${dur}ms (기록 ${s.durMs ?: "-"}ms ÷ ${job.swipeSpeed}배)")
+            }
             return ok
         }
         return waitAndClick(job, s.text, timeoutMs, s.hintX, s.hintY)
@@ -972,6 +983,7 @@ class MacroService : AccessibilityService() {
         var start: PageSig? = null
         var firstChecked = false
         var fastFirst = false
+        var firstMissed = false
         var route: RoutePlan? = null
         if (plan.replayRoute) {
             route = prepareRoute(job)
@@ -979,7 +991,9 @@ class MacroService : AccessibilityService() {
             val s0 = job.steps.firstOrNull()
             val g0 = route.grids.firstOrNull()
             if (s0 != null && route.useRefs && route.waits[0] && g0 != null) {
-                firstChecked = awaitScreen(g0, s0.hintX, s0.hintY, "앱 첫 화면")
+                val v0 = awaitScreen(g0, s0.hintX, s0.hintY, "앱 첫 화면")
+                firstChecked = v0 != null
+                firstMissed = v0 == ScreenVerdict.TIMEOUT
             }
             if (firstChecked) {
                 // 정각 0.3초 전에 대상 앱이 앞에 있는지만 가볍게 확인 -> 정각에는 확인 없이 바로 누름
@@ -998,7 +1012,7 @@ class MacroService : AccessibilityService() {
         if (route != null) {
             replayRoute(
                 job, waitLoaded = plan.waitLoadedBetweenSteps, initial = start, firstScreenChecked = firstChecked,
-                route = route, fastFirst = fastFirst, fire = fireAt to offset,
+                route = route, fastFirst = fastFirst, fire = fireAt to offset, firstMissed = firstMissed,
             )?.let { return it }
         } else {
             LogStore.add(if (mode == Mode.LIVE) "정각 — 쿠폰 선택 시작" else "앱 실행 후 ${(fireAt - launchAt) / 1000.0}초 경과")
@@ -1610,6 +1624,20 @@ class MacroService : AccessibilityService() {
             out[r * ScreenRef.COLS + c] = sum / (cell * cell)
         }
         return out
+    }
+
+    /** 동작을 보내고 끝날 때까지(최대 길이+0.8초) 기다린다. 못 보내면 false */
+    private fun gestureAndWait(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long): Boolean {
+        val done = CountDownLatch(1)
+        val ok = gesture(
+            x1, y1, x2, y2, durationMs,
+            object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) = done.countDown()
+                override fun onCancelled(gestureDescription: GestureDescription?) = done.countDown()
+            },
+        )
+        if (ok) done.await(durationMs + 800, TimeUnit.MILLISECONDS)
+        return ok
     }
 
     /** 마지막으로 동작(탭/스와이프)을 시스템에 보낸 시각(epoch ms) — 정각 대비 지연 확인용 */

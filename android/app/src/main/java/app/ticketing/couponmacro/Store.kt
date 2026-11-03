@@ -38,6 +38,7 @@ object Store {
             .putBoolean("autoRun", f.autoRun)
             .putBoolean("routeAtOpen", f.routeAtOpen)
             .putString("launchLeadSec", f.launchLeadSec)
+            .putString("swipeSpeed", f.swipeSpeed)
             .putString("warnSec", f.warnSec)
             .putBoolean("showDots", f.showDots)
             .commit()
@@ -140,6 +141,7 @@ object Store {
             autoRun = p.getBoolean("autoRun", d.autoRun),
             routeAtOpen = p.getBoolean("routeAtOpen", d.routeAtOpen),
             launchLeadSec = p.getString("launchLeadSec", d.launchLeadSec).orEmpty().ifBlank { d.launchLeadSec },
+            swipeSpeed = p.getString("swipeSpeed", d.swipeSpeed).orEmpty().ifBlank { d.swipeSpeed },
             warnSec = p.getString("warnSec", d.warnSec).orEmpty().ifBlank { d.warnSec },
             showDots = p.getBoolean("showDots", d.showDots),
         )

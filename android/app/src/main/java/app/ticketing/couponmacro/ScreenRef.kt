@@ -33,6 +33,9 @@ object ScreenRef {
     /** 이 시간을 넘기면 원하는 화면이 안 떠도 그대로 진행 */
     const val MAX_WAIT_MS = 6_000L
 
+    /** 한 번 시간 초과(기록 때와 화면이 달라 비교가 잘 안 되는 상황)한 뒤의 단계들은 더 짧게만 기다린다 */
+    const val MAX_WAIT_AFTER_MISS_MS = 2_500L
+
     /** 화면 캡처 최소 간격(시스템 제한 약 1/3초 — 걸리면 코드 3 으로 알려 주고 다시 시도한다) */
     const val MIN_SHOT_INTERVAL_MS = 330L
 
@@ -154,10 +157,13 @@ class ScreenWait(
 
 /** 경로 재생에서 '원하는 화면이 나올 때까지 기다릴 단계' 결정 (순수 함수) */
 object RouteScreens {
-    /** i번째 단계를 누르기 전에 기록 때 화면이 뜰 때까지 기다릴지: 기준 화면이 있고 필수 단계이며, 앞 단계와 다른 화면일 때 */
+    /**
+     * i번째 단계를 누르기 전에 기록 때 화면이 뜰 때까지 기다릴지: 기준 화면이 있고 필수 단계이며, 앞 단계와 다른 화면일 때.
+     * 스와이프(스크롤)는 특정 버튼을 누르는 게 아니라서 화면을 기다리지 않고 바로 한다 — 스크롤 뒤의 화면은 다음 단계가 확인한다.
+     */
     fun waitsBefore(steps: List<Step>, i: Int): Boolean {
         val s = steps.getOrNull(i) ?: return false
-        if (s.optional) return false
+        if (s.optional || s.isSwipe) return false
         val mine = ScreenRef.gridOf(s.ref) ?: return false
         val prev = if (i > 0) ScreenRef.gridOf(steps[i - 1].ref) else null
         return prev == null || !ScreenRef.sameScreen(prev, mine)

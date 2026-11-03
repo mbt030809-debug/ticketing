@@ -219,6 +219,16 @@ class JobTest {
     }
 
     @Test
+    fun swipeSpeedDefaultsToTwiceAndMustBeInRange() {
+        val base = FormState(pkg = "a.b", targets = "x", coupons = "c")
+        assertEquals(2f, base.toJob(false).job!!.swipeSpeed, 0f)
+        assertEquals(3.5f, base.copy(swipeSpeed = "3.5").toJob(false).job!!.swipeSpeed, 0f)
+        assertNotNull(base.copy(swipeSpeed = "0.1").toJob(false).error)
+        assertNotNull(base.copy(swipeSpeed = "9").toJob(false).error)
+        assertNotNull(base.copy(swipeSpeed = "abc").toJob(false).error)
+    }
+
+    @Test
     fun launchLeadMustBeBetweenZeroAndSixHundredSeconds() {
         val base = FormState(pkg = "a.b", targets = "x", coupons = "c")
         assertNotNull(base.copy(launchLeadSec = "-1").toJob(false).error)

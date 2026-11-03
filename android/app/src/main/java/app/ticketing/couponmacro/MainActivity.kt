@@ -197,6 +197,7 @@ class MainActivity : Activity() {
             routeAtOpenCb = CheckBox(this).apply { text = "경로 이동을 오픈 정각에 시작 (끄면 미리 이동해 두고 대기)" }
             b.addView(routeAtOpenCb)
             field(b, K_LAUNCH, "앱 실행 시점: 오픈 몇 초 전 (0~600, 기본 5)")
+            field(b, K_SWIPE, "스크롤 속도: 기록한 속도의 몇 배 (0.5~8, 기본 2 — 너무 멀리 넘어가면 낮추기)")
             field(b, K_WARN, "자동 실행 알람: 회차 몇 초 전에 울릴지 (20~600, 기본 60)")
             field(b, K_LEAD, "미리 누르기 lead (ms)")
             field(b, K_INTERVAL, "재시도 간격 (ms)")
@@ -726,7 +727,7 @@ class MainActivity : Activity() {
         refreshOnMiss = refreshCb.isChecked,
         slots = slotsText, slotsOff = slotsOff,
         autoRun = autoCb.isChecked, warnSec = f(K_WARN),
-        routeAtOpen = routeAtOpenCb.isChecked, launchLeadSec = f(K_LAUNCH),
+        routeAtOpen = routeAtOpenCb.isChecked, launchLeadSec = f(K_LAUNCH), swipeSpeed = f(K_SWIPE),
         showDots = dotsCb.isChecked,
     )
 
@@ -750,6 +751,7 @@ class MainActivity : Activity() {
         dotsCb.isChecked = s.showDots
         fields.getValue(K_WARN).setText(s.warnSec)
         fields.getValue(K_LAUNCH).setText(s.launchLeadSec)
+        fields.getValue(K_SWIPE).setText(s.swipeSpeed)
         routeAtOpenCb.isChecked = s.routeAtOpen
         autoCb.isChecked = s.autoRun
         applySlots(s.slots, s.slotsOff)
@@ -836,6 +838,7 @@ class MainActivity : Activity() {
         private const val K_LEAD = "leadMs"
         private const val K_WARN = "warnSec"
         private const val K_LAUNCH = "launchLeadSec"
+        private const val K_SWIPE = "swipeSpeed"
         private const val K_INTERVAL = "intervalMs"
         private const val K_ATTEMPTS = "maxAttempts"
         private const val K_WAIT = "resultWaitSec"

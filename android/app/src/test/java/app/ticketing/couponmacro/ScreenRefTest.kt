@@ -196,6 +196,19 @@ class RouteScreensTest {
     }
 
     @Test
+    fun scrollStepsDoNotWaitForAScreenButTheTapAfterThemDoes() {
+        // 스크롤은 바로 하고(화면을 기다리다 늦어지지 않음), 스크롤이 끝난 화면은 그 다음 탭이 확인한다
+        val steps = listOf(
+            Step("", false, 0.2f, 0.3f, null, ref = a),
+            Step("", false, 0.5f, 0.7f, 800, 0.5f, 0.3f, 350, b),   // 스와이프
+            Step("", false, 0.5f, 0.6f, 900, ref = a),              // 스크롤 뒤 화면에서 누르기
+        )
+        assertTrue(RouteScreens.waitsBefore(steps, 0))
+        assertFalse(RouteScreens.waitsBefore(steps, 1))
+        assertTrue(RouteScreens.waitsBefore(steps, 2))
+    }
+
+    @Test
     fun endScreenIsOnlyUsedWhenRecorded() {
         assertNull(RouteScreens.endGrid(listOf(Step("", false, 0.1f, 0.1f))))
         assertNull(RouteScreens.endGrid(emptyList()))
