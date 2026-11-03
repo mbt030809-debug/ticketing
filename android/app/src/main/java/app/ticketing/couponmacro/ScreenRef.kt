@@ -47,6 +47,10 @@ object ScreenRef {
     /** 지금 화면이 '이전 화면'과 이 비율 이상 같으면 아직 화면이 전환되지 않은 것 */
     const val LEFT_PREV = 0.90f
 
+    /** 연속으로 읽은 두 화면이 이 비율 이상 같으면 '멈춰 있는' 화면(로딩 중이 아님), 그 상태가 STILL_MS 이어지면 '멈춘 것' */
+    const val STILL = 0.97f
+    const val STILL_MS = 1_000L
+
     /** 누른 곳 주변(가로 ±2칸, 세로 ±1칸)의 같은 칸 비율 */
     const val REGION = 0.75f
 
@@ -137,7 +141,8 @@ object ScreenRef {
     fun sameScreen(a: IntArray, b: IntArray): Boolean = score(a, b, null, null).global >= SAME
 }
 
-enum class ScreenVerdict { WAIT, MATCH, TIMEOUT }
+/** STALLED: (ScreenWait 는 내지 않음) 정각까지 확인이 안 됐지만 화면이 멈춰 있어 기다려도 소용없다고 보고 진행하는 경우 */
+enum class ScreenVerdict { WAIT, MATCH, TIMEOUT, STALLED }
 
 /**
  * 기록 때 화면(ref)이 지금 화면으로 나타나기를 기다리는 판정.
@@ -161,10 +166,25 @@ class ScreenWait(
     var last: ScreenRef.Score? = null
         private set
     private var streak = 0
+    private var lastCap: IntArray? = null
+    private var lastCapAt = 0L
+    private var stillSinceMs: Long? = null
+
+    /** 화면이 (연속으로 읽은 것끼리 거의 같게) 멈춰 있은 시간(ms). 로딩 중이거나 아직 모르면 0 */
+    fun stillForMs(nowMs: Long): Long = stillSinceMs?.let { nowMs - it } ?: 0L
 
     /** @param cur 지금 화면 격자(캡처 실패면 null) */
     fun update(cur: IntArray?, nowMs: Long): ScreenVerdict {
         val elapsed = nowMs - startMs
+        // 화면이 멈춰 있는지(로딩이 끝나 더 안 바뀌는지) 추적
+        val lc = lastCap
+        if (cur != null && lc != null && ScreenRef.score(lc, cur, null, null).global >= ScreenRef.STILL) {
+            if (stillSinceMs == null) stillSinceMs = lastCapAt
+        } else {
+            stillSinceMs = null
+        }
+        lastCap = cur
+        lastCapAt = nowMs
         if (cur == null) {
             streak = 0
         } else {

@@ -107,6 +107,19 @@ class StepSettleTest {
     }
 
     @Test
+    fun firstTapIsNeverHeldPastTheTargetTimeByTheHalfSecondRule() {
+        // 회귀: 정각에 바로 누르지 않았다. 앱을 10초 전부터 열어 뒀으므로 '화면이 뜬 뒤 0.5초' 때문에 정각을 넘기지 않는다
+        // 정각 0.2초 전에 화면을 확인했으면 0.5초를 다 채우지 않고 정각(0.2초 뒤)까지만 기다린다
+        assertEquals(200L, Settle.holdWaitMs(matchedAtMs = 9_800, nowMs = 9_800, holdMs = 500, capAtMs = 10_000))
+        // 정각 10초 전에 확인했으면 이미 지나서 바로
+        assertEquals(0L, Settle.holdWaitMs(0, 9_950, 500, capAtMs = 10_000))
+        // 정각이 이미 지났으면(마감 지남) 더 기다리지 않는다
+        assertEquals(0L, Settle.holdWaitMs(10_100, 10_100, 500, capAtMs = 10_000))
+        // 마감이 없으면(일반 단계) 0.5초를 다 채운다
+        assertEquals(500L, Settle.holdWaitMs(10_100, 10_100, 500, capAtMs = null))
+    }
+
+    @Test
     fun minimumWaitFollowsTheRecordedGapWithinBounds() {
         assertEquals(600L, Settle.minWaitMs(null, isLast = false))
         assertEquals(300L, Settle.minWaitMs(100, isLast = false))

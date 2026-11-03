@@ -391,7 +391,11 @@ class MainActivity : Activity() {
     private fun refreshStatus() {
         val svc = MacroService.instance
         val on = svc != null
-        accStatus.text = if (on) "접근성: 켜짐" else "접근성: 꺼짐"
+        accStatus.text = if (on) {
+            "접근성: 켜짐" + if (svc?.captureCapability() == false) "\n⚠ 화면 캡처 권한 없음 — 접근성 설정에서 '쿠폰 매크로'를 껐다가 다시 켜세요 (기준 화면 기능에 필요)" else ""
+        } else {
+            "접근성: 꺼짐"
+        }
         accBox.visibility = if (on) View.GONE else View.VISIBLE
         val running = svc?.isRunning() == true
         val reserved = autoCb.isChecked // 예약 켜짐: 작업이 끝나도 켜진 회차마다 매일 이어서 실행
@@ -419,6 +423,7 @@ class MainActivity : Activity() {
             device = "${Build.MANUFACTURER} ${Build.MODEL}",
             accessibilityOn = svc != null,
             running = svc?.isRunning() == true,
+            captureNote = svc?.captureStatus().orEmpty(),
         )
         val report = DebugReport.build(env, profile.label, readForm(), LogStore.text(300))
         val cm = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager

@@ -37,6 +37,15 @@ object Settle {
     /** 화면 확인 시각(matchedAtMs) 기준으로 holdMs 가 지나기까지 남은 시간(ms, 0 이상) */
     fun holdRemainingMs(matchedAtMs: Long, nowMs: Long, holdMs: Long): Long = (matchedAtMs + holdMs - nowMs).coerceAtLeast(0L)
 
+    /**
+     * 실제로 기다릴 시간: holdRemainingMs 이되, capAtMs 가 있으면 그 시각을 넘기지 않는다.
+     * 첫 단계는 앱을 정각 10초 전부터 열어 뒀으니 '화면이 뜬 뒤 0.5초' 규칙 때문에 정각을 넘겨 늦게 누르지 않는다.
+     */
+    fun holdWaitMs(matchedAtMs: Long, nowMs: Long, holdMs: Long, capAtMs: Long?): Long {
+        val w = holdRemainingMs(matchedAtMs, nowMs, holdMs)
+        return if (capAtMs == null) w else minOf(w, (capAtMs - nowMs).coerceAtLeast(0L))
+    }
+
     /** 마지막 이동 단계 뒤(쿠폰 화면이 뜨기 전) 최소 대기 */
     const val LAST_STEP_MIN_MS = 400L
 

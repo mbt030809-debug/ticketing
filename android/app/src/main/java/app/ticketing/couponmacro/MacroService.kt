@@ -1,6 +1,7 @@
 package app.ticketing.couponmacro
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.app.KeyguardManager
 import android.app.Notification
@@ -950,6 +951,7 @@ class MacroService : AccessibilityService() {
     private fun runJob(job: Job, mode: Mode) {
         runningOpenAtMs = if (mode == Mode.LIVE) job.openAtMillis else 0L
         screenMatchedAt = 0L
+        captureWarned = false
         timeline = null
         runOffset = 0L
         dots = job.showDots
@@ -991,10 +993,11 @@ class MacroService : AccessibilityService() {
     private fun replayRoute(
         job: Job, waitLoaded: Boolean, initial: PageSig? = null, firstScreenChecked: Boolean = false,
         route: RoutePlan = prepareRoute(job), fastFirst: Boolean = false, fire: Pair<Long, Long>? = null,
+        refsUsable: Boolean = true,
     ): Outcome? {
         var cur: PageSig? = initial // 없으면 첫 시간 기준 대기 때 처음 읽은 화면을 기준으로 삼는다(첫 탭 전에 화면 전체를 읽느라 늦추지 않음)
         val n = job.steps.size
-        var useRefs = route.useRefs
+        var useRefs = route.useRefs && refsUsable // 정각 전 확인에서 캡처가 안 되는 걸 알았으면 정각에 또 시도하며 늦지 않도록 처음부터 시간 기준
         // 선착순은 렉으로 화면이 늦게 뜰 수 있다: 화면이 전환돼 원하는 화면이 뜰 때까지 충분히(최대 1분) 기다린 뒤에 누른다
         val maxWait = ScreenRef.MAX_WAIT_MS
         for ((i, s) in job.steps.withIndex()) {
@@ -1008,7 +1011,9 @@ class MacroService : AccessibilityService() {
                     holdAfterScreen(job.afterScreenMs) // 화면이 뜬 뒤 0.5초(설정) 지나서 누른다
                 }
             } else if (useRefs && i == 0 && firstScreenChecked && route.waits[0]) {
-                holdAfterScreen(job.afterScreenMs) // 앱 첫 화면은 정각 전에 미리 확인했다 — 확인한 지 0.5초가 안 됐으면 그만큼만 더 기다림
+                // 앱 첫 화면은 정각 전에 미리 확인했다. '화면이 뜬 뒤 0.5초' 규칙 때문에 정각을 넘겨 늦게 누르지 않는다(앱은 10초 전부터 열려 있음)
+                val fireElapsed = fire?.let { SystemClock.elapsedRealtime() + (it.first - (System.currentTimeMillis() + it.second)) }
+                holdAfterScreen(job.afterScreenMs, if (fireElapsed != null && screenMatchedAt <= fireElapsed) fireElapsed else null)
             }
             // 첫 탭: 정각에 늦지 않도록 확인 없이 바로 누른다(앞에서 미리 확인해 둠). 기록은 누른 뒤에 남긴다
             val ok = runStep(job, s, if (s.optional) 1_500 else 10_000, assumeForeground = i == 0 && fastFirst)
@@ -1061,6 +1066,9 @@ class MacroService : AccessibilityService() {
     private fun prepareRoute(job: Job): RoutePlan {
         val r = RoutePlan(job.steps)
         if (r.hasRefs && !r.useRefs) LogStore.add("기준 화면은 안드로이드 11 이상에서만 사용합니다 — 시간 기준으로 진행")
+        if (r.useRefs && captureCapability() == false) {
+            LogStore.add("⚠ 접근성 서비스에 '화면 캡처' 권한이 없습니다 — 접근성 설정에서 '쿠폰 매크로'를 껐다가 다시 켜세요 (업데이트 후 필요할 수 있음). 지금은 시간 기준으로 진행합니다")
+        }
         if (r.useRefs) {
             LogStore.add("기준 화면 사용: 원하는 화면이 뜰 때 누릅니다 (대기 ${r.waits.count { it }}단계${if (r.end != null) " + 쿠폰 화면" else ""})")
         }
@@ -1073,6 +1081,7 @@ class MacroService : AccessibilityService() {
      */
     private fun awaitScreen(
         ref: IntArray, fx: Float?, fy: Float?, why: String, maxWaitMs: Long = ScreenRef.MAX_WAIT_MS, prev: IntArray? = null,
+        stallDeadlineElapsed: Long? = null, canGiveUp: (() -> Boolean)? = null,
     ): ScreenVerdict? {
         val start = SystemClock.elapsedRealtime()
         val w = ScreenWait(ref, fx, fy, start, maxWaitMs, prev)
@@ -1092,7 +1101,16 @@ class MacroService : AccessibilityService() {
                 fails = 0
             }
             val sc = w.last
-            when (w.update(cur, now)) {
+            val verdict = w.update(cur, now)
+            // 정각(마감)까지 기록 화면과 안 맞았는데 화면이 멈춰 있으면(로딩 중이 아님) 더 기다려도 소용없다 -> 정각에 그대로 진행
+            if (verdict == ScreenVerdict.WAIT && stallDeadlineElapsed != null && now >= stallDeadlineElapsed &&
+                w.stillForMs(now) >= ScreenRef.STILL_MS && (canGiveUp?.invoke() ?: true)
+            ) {
+                val s = w.last
+                LogStore.add("첫 화면이 기록과 달라(전체 ${pct(s?.global)} 주변 ${pct(s?.region)}) 확인은 못 했지만 화면이 멈춰 있어 정각에 그대로 누릅니다($why)")
+                return ScreenVerdict.STALLED
+            }
+            when (verdict) {
                 ScreenVerdict.MATCH -> {
                     val s = w.last
                     LogStore.add("원하는 화면 확인($why): ${now - start}ms 대기 · 전체 ${pct(s?.global)} 누를 곳 주변 ${pct(s?.region)}")
@@ -1104,6 +1122,7 @@ class MacroService : AccessibilityService() {
                     LogStore.add("원하는 화면이 ${(now - start) / 1000}초가 지나도 안 떠서 어쩔 수 없이 진행($why) · 일치 전체 ${pct(s?.global)} 누를 곳 주변 ${pct(s?.region)}")
                     return ScreenVerdict.TIMEOUT
                 }
+                ScreenVerdict.STALLED -> {}
                 ScreenVerdict.WAIT -> if (now - lastLog >= 2_000) {
                     lastLog = now
                     val s = w.last ?: sc
@@ -1169,8 +1188,9 @@ class MacroService : AccessibilityService() {
                 return last
             }
             if (nowMs >= fireAt) {
-                if (stable) {
-                    if (waitingLogged) LogStore.add("앱 화면 로딩 완료 — 경로 이동 시작 (정각보다 ${nowMs - fireAt}ms 늦음)")
+                if (stable || sig != null) {
+                    // 안정이 확인됐거나, 앱이 앞에 떠 있으면(앱은 10초 전부터 열려 있다) 정각에 그대로 누른다 — 화면 구성이 달라 안정 판정이 안 되는 앱(이미지 위주)에서 늦지 않도록
+                    if (waitingLogged) LogStore.add("앱 화면 확인 — 경로 이동 시작 (정각보다 ${nowMs - fireAt}ms 늦음)")
                     beforeFire?.invoke()
                     return last
                 }
@@ -1265,6 +1285,7 @@ class MacroService : AccessibilityService() {
         var start: PageSig? = null
         var firstChecked = false
         var fastFirst = false
+        var refsBroken = false
         var route: RoutePlan? = null
         if (plan.replayRoute) {
             route = prepareRoute(job)
@@ -1272,8 +1293,12 @@ class MacroService : AccessibilityService() {
             val s0 = job.steps.firstOrNull()
             val g0 = route.grids.firstOrNull()
             if (s0 != null && route.useRefs && route.waits[0] && g0 != null) {
-                firstChecked = awaitScreen(g0, s0.hintX, s0.hintY, "앱 첫 화면") != null
-                if (firstChecked) tlMark("첫 화면 확인")
+                // 정각까지 확인이 안 되더라도 화면이 멈춰 있으면(앱은 10초 전부터 열려 있다) 정각에 그대로 누른다
+                val fireElapsed = SystemClock.elapsedRealtime() + (fireAt - (System.currentTimeMillis() + offset))
+                val v0 = awaitScreen(g0, s0.hintX, s0.hintY, "앱 첫 화면", stallDeadlineElapsed = fireElapsed, canGiveUp = { targetRoot(job) != null })
+                firstChecked = v0 != null
+                if (v0 == null) refsBroken = true // 화면 캡처가 안 됨: 경로 전체를 시간 기준으로(정각에 다시 시도하느라 늦어지지 않게)
+                if (firstChecked) tlMark(if (v0 == ScreenVerdict.STALLED) "첫 화면(확인 못 함, 정각 진행)" else "첫 화면 확인")
             }
             if (firstChecked) {
                 // 정각 0.3초 전에 대상 앱이 앞에 있는지만 가볍게 확인 -> 정각에는 확인 없이 바로 누름
@@ -1295,7 +1320,7 @@ class MacroService : AccessibilityService() {
         if (route != null) {
             replayRoute(
                 job, waitLoaded = plan.waitLoadedBetweenSteps, initial = start, firstScreenChecked = firstChecked,
-                route = route, fastFirst = fastFirst, fire = fireAt to offset,
+                route = route, fastFirst = fastFirst, fire = fireAt to offset, refsUsable = !refsBroken,
             )?.let { return it }
             tlMark("경로 끝")
         } else {
@@ -1856,6 +1881,21 @@ class MacroService : AccessibilityService() {
 
     @Volatile private var lastShotAt = 0L
     @Volatile private var lastShotFail = -1
+    @Volatile private var captureWarned = false
+
+    /** 접근성 서비스가 '화면 캡처' 권한을 갖고 있는지: true/false, 안드로이드 10 이하는 null(해당 없음) */
+    @SuppressLint("NewApi")
+    fun captureCapability(): Boolean? {
+        if (Build.VERSION.SDK_INT < 30) return null
+        val caps = serviceInfo?.capabilities ?: return false
+        return (caps and AccessibilityServiceInfo.CAPABILITY_CAN_TAKE_SCREENSHOT) != 0
+    }
+
+    fun captureStatus(): String = when (captureCapability()) {
+        null -> "안드로이드 10 이하라 사용 안 함(시간 기준)"
+        true -> "사용 가능"
+        false -> "권한 없음 → 접근성에서 '쿠폰 매크로'를 껐다 켜기"
+    }
 
     /**
      * 지금 화면을 ScreenRef 격자(칸별 밝기)로 읽는다. 안드로이드 11+ 에서만 가능하고, 실패하면 null(lastShotFail 에 시스템 코드).
@@ -1872,6 +1912,7 @@ class MacroService : AccessibilityService() {
             val latch = CountDownLatch(1)
             var grid: IntArray? = null
             var fail = -1
+            try {
             takeScreenshot(
                 Display.DEFAULT_DISPLAY,
                 shotCbExecutor,
@@ -1900,6 +1941,15 @@ class MacroService : AccessibilityService() {
                     }
                 },
             )
+            } catch (e: SecurityException) {
+                // 접근성 서비스에 '화면 캡처' 권한이 없다(업데이트 직후 등) — 실행이 중단되지 않게 하고 안내를 남긴다
+                lastShotFail = -2
+                if (!captureWarned) {
+                    captureWarned = true
+                    LogStore.add("화면 캡처 권한이 없습니다 → 접근성 설정에서 '쿠폰 매크로'를 껐다가 다시 켜 주세요. 그동안은 시간 기준으로 진행합니다 ($e)")
+                }
+                return null
+            }
             latch.await(3, TimeUnit.SECONDS)
             grid?.let { return it }
             lastShotFail = fail
@@ -2028,9 +2078,9 @@ class MacroService : AccessibilityService() {
     @Volatile private var screenMatchedAt = 0L
 
     /** 화면이 뜬 걸 확인한 뒤 ms 가 지나기까지 기다린다(이미 지났으면 바로). 뜨자마자 누르면 버튼이 아직 안 눌리는 경우 대비 */
-    private fun holdAfterScreen(ms: Long) {
+    private fun holdAfterScreen(ms: Long, capAtElapsed: Long? = null) {
         if (ms <= 0) return
-        val wait = Settle.holdRemainingMs(screenMatchedAt, SystemClock.elapsedRealtime(), ms)
+        val wait = Settle.holdWaitMs(screenMatchedAt, SystemClock.elapsedRealtime(), ms, capAtElapsed)
         if (wait > 0) {
             LogStore.add("화면이 뜬 뒤 ${wait}ms 더 기다렸다가 누릅니다 (설정 ${ms}ms)")
             sleep(wait)

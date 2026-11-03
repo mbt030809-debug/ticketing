@@ -231,6 +231,25 @@ class ScreenWaitTest {
     }
 
     @Test
+    fun aScreenThatStopsChangingIsDetectedSoTheFirstTapIsNotHeldPastTheTargetTime() {
+        // 정각에 첫 탭: 기록 화면과 안 맞아도 화면이 멈춰 있으면(로딩 중이 아님) 기다려도 소용없다 -> 호출 쪽이 정각에 그대로 누른다
+        val w = ScreenWait(ref, 0.5f, 0.5f, startMs = 0)
+        val other = fakePage(6) // 기록과 다른 화면
+        assertEquals(0L, w.stillForMs(100))
+        assertEquals(ScreenVerdict.WAIT, w.update(other, 100))
+        assertEquals(0L, w.stillForMs(100))                       // 아직 비교할 이전 화면이 없음
+        assertEquals(ScreenVerdict.WAIT, w.update(other, 500))
+        assertEquals(ScreenVerdict.WAIT, w.update(other, 1_200))
+        assertTrue("1초 넘게 같은 화면: ${w.stillForMs(1_200)}", w.stillForMs(1_200) >= ScreenRef.STILL_MS)
+        // 화면이 다시 바뀌면(로딩 중) 멈춘 것으로 보지 않는다
+        assertEquals(ScreenVerdict.WAIT, w.update(fakePage(3), 1_600))
+        assertEquals(0L, w.stillForMs(1_600))
+        // 캡처 실패도 멈춘 것으로 보지 않는다
+        assertEquals(ScreenVerdict.WAIT, w.update(null, 2_000))
+        assertEquals(0L, w.stillForMs(2_000))
+    }
+
+    @Test
     fun tappedNeighborhoodMustAlwaysMatch() {
         // 전체는 거의 같아도 누를 자리 주변이 다르면(다른 버튼이 있음) 누르지 않는다
         val cur = ref.copyOf()
