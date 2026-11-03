@@ -204,10 +204,12 @@ object RouteScreens {
     /**
      * i번째 단계를 누르기 전에 기록 때 화면이 뜰 때까지 기다릴지: 기준 화면이 있고 필수 단계이며, 앞 단계와 다른 화면일 때.
      * 스크롤(스와이프)도 마찬가지로 그 화면이 뜬 뒤에 한다 — 화면이 아직 안 떴을 때 쓸면 동작이 헛돌아 이후 단계가 모두 어긋난다.
+     * 단, 스크롤 바로 다음 단계는 기다리지 않고 스크롤이 끝나자마자 누른다(스크롤 뒤 대기를 없애 달라는 요청).
      */
     fun waitsBefore(steps: List<Step>, i: Int): Boolean {
         val s = steps.getOrNull(i) ?: return false
         if (s.optional) return false
+        if (i > 0 && steps[i - 1].isSwipe) return false
         val mine = ScreenRef.gridOf(s.ref) ?: return false
         val prev = if (i > 0) ScreenRef.gridOf(steps[i - 1].ref) else null
         return prev == null || !ScreenRef.sameScreen(prev, mine)

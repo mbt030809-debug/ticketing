@@ -265,18 +265,21 @@ class RouteScreensTest {
     }
 
     @Test
-    fun scrollStepsAlsoWaitForTheirScreenSoALagDoesNotMakeThemFizzle() {
-        // 렉으로 화면이 늦게 뜨는 중에 쓸면 스크롤이 헛돌아 이후 단계가 모두 어긋난다 -> 스크롤도 그 화면이 뜬 뒤에 한다
+    fun scrollWaitsForItsScreenButTheStepRightAfterItClicksImmediately() {
+        // 렉으로 화면이 늦게 뜨는 중에 쓸면 스크롤이 헛돌아 이후 단계가 어긋난다 -> 스크롤은 그 화면이 뜬 뒤에 한다.
+        // 하지만 스크롤이 끝난 뒤에는 기다리지 않고 바로 누른다 (요청: 스크롤 후 대기 없이 클릭)
         val steps = listOf(
             Step("", false, 0.2f, 0.3f, null, ref = a),
             Step("", false, 0.5f, 0.7f, 800, 0.5f, 0.3f, 350, b),   // 스와이프
-            Step("", false, 0.5f, 0.6f, 900, ref = a),              // 스크롤 뒤 화면에서 누르기
+            Step("", false, 0.5f, 0.6f, 900, ref = a),              // 스크롤 바로 다음 탭
+            Step("", false, 0.4f, 0.4f, 900, ref = b),              // 그 다음 탭은 평소처럼 화면을 확인
             Step("", true, 0.5f, 0.7f, 800, 0.5f, 0.3f, 350, b),    // 없어도 되는 스크롤은 기다리지 않음
         )
         assertTrue(RouteScreens.waitsBefore(steps, 0))
         assertTrue(RouteScreens.waitsBefore(steps, 1))
-        assertTrue(RouteScreens.waitsBefore(steps, 2))
-        assertFalse(RouteScreens.waitsBefore(steps, 3))
+        assertFalse("스크롤 바로 다음은 기다리지 않고 누른다", RouteScreens.waitsBefore(steps, 2))
+        assertTrue(RouteScreens.waitsBefore(steps, 3))
+        assertFalse(RouteScreens.waitsBefore(steps, 4))
     }
 
     @Test

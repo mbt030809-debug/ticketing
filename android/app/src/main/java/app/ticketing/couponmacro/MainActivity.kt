@@ -198,6 +198,7 @@ class MainActivity : Activity() {
             routeAtOpenCb = CheckBox(this).apply { text = "경로 이동을 오픈 정각에 시작 (끄면 미리 이동해 두고 대기)" }
             b.addView(routeAtOpenCb)
             field(b, K_LAUNCH, "앱 실행 시점: 오픈 몇 초 전 (0~600, 기본 5)")
+            field(b, K_AFTER_SCROLL, "스크롤이 끝난 뒤 다음 동작까지 대기 (초, 0~5, 기본 0 = 바로 — 스크롤 직후 클릭이 안 먹으면 0.3~0.5)")
             field(b, K_AFTER, "화면이 뜬 뒤 클릭까지 대기 (초, 0~5, 기본 0.5 — 뜨자마자 누르면 안 눌릴 때 늘리기)")
             field(b, K_SWIPE, "스크롤 속도: 손가락 이동을 기록의 몇 배 빠르게 (0.5~8, 기본 2 — 스크롤 거리는 그대로)")
             field(b, K_WARN, "자동 실행 알람: 회차 몇 초 전에 울릴지 (20~600, 기본 60)")
@@ -729,7 +730,7 @@ class MainActivity : Activity() {
         refreshOnMiss = refreshCb.isChecked,
         slots = slotsText, slotsOff = slotsOff,
         autoRun = autoCb.isChecked, warnSec = f(K_WARN),
-        routeAtOpen = routeAtOpenCb.isChecked, launchLeadSec = f(K_LAUNCH), swipeSpeed = f(K_SWIPE), afterScreenSec = f(K_AFTER),
+        routeAtOpen = routeAtOpenCb.isChecked, launchLeadSec = f(K_LAUNCH), swipeSpeed = f(K_SWIPE), afterScreenSec = f(K_AFTER), afterScrollSec = f(K_AFTER_SCROLL),
         showDots = dotsCb.isChecked,
     )
 
@@ -755,6 +756,7 @@ class MainActivity : Activity() {
         fields.getValue(K_LAUNCH).setText(s.launchLeadSec)
         fields.getValue(K_SWIPE).setText(s.swipeSpeed)
         fields.getValue(K_AFTER).setText(s.afterScreenSec)
+        fields.getValue(K_AFTER_SCROLL).setText(s.afterScrollSec)
         routeAtOpenCb.isChecked = s.routeAtOpen
         autoCb.isChecked = s.autoRun
         applySlots(s.slots, s.slotsOff)
@@ -843,6 +845,7 @@ class MainActivity : Activity() {
         private const val K_LAUNCH = "launchLeadSec"
         private const val K_SWIPE = "swipeSpeed"
         private const val K_AFTER = "afterScreenSec"
+        private const val K_AFTER_SCROLL = "afterScrollSec"
         private const val K_INTERVAL = "intervalMs"
         private const val K_ATTEMPTS = "maxAttempts"
         private const val K_WAIT = "resultWaitSec"

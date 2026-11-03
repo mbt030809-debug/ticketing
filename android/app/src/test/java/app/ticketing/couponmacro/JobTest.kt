@@ -240,6 +240,16 @@ class JobTest {
     }
 
     @Test
+    fun waitAfterScrollDefaultsToNoneAndMustBeInRange() {
+        val base = FormState(pkg = "a.b", targets = "x", coupons = "c")
+        assertEquals(0L, base.toJob(false).job!!.afterScrollMs) // 스크롤 직후 바로 누른다
+        assertEquals(400L, base.copy(afterScrollSec = "0.4").toJob(false).job!!.afterScrollMs)
+        assertNotNull(base.copy(afterScrollSec = "-1").toJob(false).error)
+        assertNotNull(base.copy(afterScrollSec = "9").toJob(false).error)
+        assertNotNull(base.copy(afterScrollSec = "x").toJob(false).error)
+    }
+
+    @Test
     fun launchLeadMustBeBetweenZeroAndSixHundredSeconds() {
         val base = FormState(pkg = "a.b", targets = "x", coupons = "c")
         assertNotNull(base.copy(launchLeadSec = "-1").toJob(false).error)

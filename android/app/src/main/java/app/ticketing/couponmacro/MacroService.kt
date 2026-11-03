@@ -1015,6 +1015,12 @@ class MacroService : AccessibilityService() {
                 continue // 없어도 되는 단계(팝업 닫기 등)가 안 보이면 화면이 안 바뀌었으니 기다릴 것 없이 다음으로
             }
             val last = i == n - 1
+            if (s.isSwipe) {
+                // 스크롤 직후에는 화면 확인·안정 대기 없이 바로 다음 동작 (설정으로 조금 기다리게 할 수 있음)
+                if (job.afterScrollMs > 0) sleep(job.afterScrollMs)
+                cur = null
+                continue
+            }
             if (useRefs && !last && route.waits[i + 1]) {
                 cur = null // 다음 단계가 '원하는 화면'이 뜰 때까지 기다린다
                 continue
