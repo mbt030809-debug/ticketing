@@ -42,6 +42,8 @@ import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 data class Outcome(val status: String, val attempts: Int, val detail: String)
 
@@ -77,6 +79,7 @@ class MacroService : AccessibilityService() {
 
     override fun onUnbind(intent: Intent?): Boolean {
         cancel()
+        hideRunGuard()
         if (recordPkg != null) {
             recordPkg = null
             hideRecordOverlay()
@@ -126,6 +129,181 @@ class MacroService : AccessibilityService() {
         cancelled = true
         worker?.interrupt()
         hidePick()
+        hideRunGuard()
+    }
+
+    // ---- 실행 중 화면 잠금(사용자 터치 차단) + 긴급 정지 버튼 ----
+    private var guardView: View? = null
+    private var guardLp: WindowManager.LayoutParams? = null
+    private var stopBtn: Button? = null
+    private var stopLp: WindowManager.LayoutParams? = null
+    @Volatile private var guardOn = false
+
+    /** 매크로 동작을 보내는 중인 횟수. 0보다 크면 잠금 창이 터치를 통과시킨다(그래야 매크로의 탭/스크롤이 아래 앱에 닿는다) */
+    private val passCount = AtomicInteger(0)
+    @Volatile private var stopPass = false
+
+    /** 정각 첫 탭을 늦추지 않으려고 미리 열어 둔 상태(첫 동작이 끝나면 닫는다) */
+    @Volatile private var guardHeld = false
+
+    private fun guardFlags(pass: Boolean) =
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+            (if (pass) WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else 0)
+
+    /**
+     * 실행이 시작되면(앱을 연 때부터) 화면 전체를 투명 창으로 덮어 사용자의 터치를 막고, 오른쪽 위에 [■ 긴급 정지] 버튼만 눌리게 둔다.
+     * 투명 창이라 화면 모습은 그대로(기준 화면 비교에 영향 없음). 끝나거나 정지하면 자동으로 사라진다.
+     */
+    private fun showRunGuard() {
+        if (guardOn) return
+        guardOn = true
+        passCount.set(0)
+        stopPass = false
+        guardHeld = false
+        main.post {
+            if (!guardOn || guardView != null) return@post
+            try {
+                val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                val v = View(this)
+                v.setOnTouchListener { _, _ -> true } // 모든 터치를 먹는다
+                val glp = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    guardFlags(false),
+                    PixelFormat.TRANSLUCENT,
+                )
+                wm.addView(v, glp)
+                guardView = v
+                guardLp = glp
+
+                val b = Button(this).apply {
+                    text = "■ 긴급 정지"
+                    setTextColor(Color.WHITE)
+                    textSize = 15f
+                    background = GradientDrawable().apply {
+                        setColor(0xE6D32F2F.toInt())
+                        cornerRadius = dp(10).toFloat()
+                    }
+                    setPadding(dp(14), 0, dp(14), 0)
+                    setOnClickListener {
+                        LogStore.add("긴급 정지 버튼 — 매크로를 멈춥니다")
+                        cancel()
+                        notifyResult("긴급 정지", "매크로를 멈췄습니다 (예약이 켜져 있으면 다음 회차는 계속됩니다 — 끄려면 앱에서 [예약 중지])")
+                    }
+                }
+                val blp = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    dp(RunGuard.BUTTON_HEIGHT_DP),
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    guardFlags(false) and WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN.inv(),
+                    PixelFormat.TRANSLUCENT,
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.END
+                    y = dp(RunGuard.BUTTON_TOP_DP)
+                    x = dp(8)
+                }
+                wm.addView(b, blp)
+                stopBtn = b
+                stopLp = blp
+                LogStore.add("실행 중 화면 터치 잠금 — 오른쪽 위 [■ 긴급 정지]로 멈출 수 있습니다")
+            } catch (e: Exception) {
+                LogStore.add("화면 잠금 표시 실패: $e")
+            }
+        }
+    }
+
+    private fun hideRunGuard() {
+        guardOn = false
+        guardHeld = false
+        passCount.set(0)
+        stopPass = false
+        main.post {
+            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+            for (v in listOf(stopBtn, guardView)) {
+                try {
+                    if (v != null) wm.removeView(v)
+                } catch (_: Exception) {
+                }
+            }
+            stopBtn = null
+            stopLp = null
+            guardView = null
+            guardLp = null
+        }
+    }
+
+    /** (메인 스레드) 동작을 보내는 중이면 잠금 창(과 필요하면 긴급 정지 버튼)이 터치를 통과시키게 설정 */
+    private fun applyGuardFlags() {
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        val pass = passCount.get() > 0
+        val gv = guardView
+        val glp = guardLp
+        if (gv != null && glp != null) {
+            glp.flags = guardFlags(pass)
+            try {
+                wm.updateViewLayout(gv, glp)
+            } catch (_: Exception) {
+            }
+        }
+        val sv = stopBtn
+        val slp = stopLp
+        if (sv != null && slp != null) {
+            slp.flags = guardFlags(pass && stopPass) and WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN.inv()
+            try {
+                wm.updateViewLayout(sv, slp)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /** 동작을 보내기 전: 잠금 창이 그 동작을 가로채지 않도록 터치 통과로 바꾸고 반영될 때까지 잠깐 기다린다 */
+    private fun acquireGuardPass(hitsStop: Boolean) {
+        if (!guardOn) return
+        passCount.incrementAndGet()
+        if (hitsStop) stopPass = true
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            applyGuardFlags()
+            return
+        }
+        val applied = CountDownLatch(1)
+        main.post {
+            try {
+                applyGuardFlags()
+            } finally {
+                applied.countDown()
+            }
+        }
+        applied.await(150, TimeUnit.MILLISECONDS)
+        Thread.sleep(20) // 창 변경이 입력 시스템에 닿을 시간
+    }
+
+    private fun releaseGuardPass() {
+        if (!guardOn) return
+        if (passCount.decrementAndGet() <= 0) {
+            passCount.set(0)
+            stopPass = false
+        }
+        main.post { applyGuardFlags() }
+    }
+
+    /** 정각 첫 동작 직전에 미리 통과 상태로 열어 둔다(정각에 창 설정을 바꾸느라 첫 탭이 늦어지지 않도록) */
+    private fun holdGuardOpen(first: Step?) {
+        if (!guardOn || guardHeld) return
+        val dm = resources.displayMetrics
+        val fx = first?.hintX
+        val fy = first?.hintY
+        val hits = fx != null && fy != null &&
+            RunGuard.stopZone(dm.widthPixels, dm.heightPixels, dm.density)
+                .touches(fx * dm.widthPixels, fy * dm.heightPixels, (first?.endX ?: fx) * dm.widthPixels, (first?.endY ?: fy) * dm.heightPixels, 8 * dm.density)
+        guardHeld = true
+        acquireGuardPass(hits)
+    }
+
+    private fun releaseHeldGuard() {
+        if (!guardHeld) return
+        guardHeld = false
+        releaseGuardPass()
     }
 
     // ---- 경로 기록: 사용자가 직접 눌러 이동하는 순서를 '이동 단계'로 저장 ----
@@ -722,6 +900,7 @@ class MacroService : AccessibilityService() {
             notifyResult(job.name, "오류: ${e.message}")
         } finally {
             runningOpenAtMs = 0L
+            hideRunGuard()
             setKeepScreenOn(false)
             releaseWakeLock()
         }
@@ -760,8 +939,9 @@ class MacroService : AccessibilityService() {
             }
             // 첫 탭: 정각에 늦지 않도록 확인 없이 바로 누른다(앞에서 미리 확인해 둠). 기록은 누른 뒤에 남긴다
             val ok = runStep(job, s, if (s.optional) 1_500 else 10_000, assumeForeground = i == 0 && fastFirst)
-            if (i == 0 && fire != null) {
-                LogStore.add("첫 동작이 나간 시각: 목표(정각-lead) 대비 ${lastDispatchAtMs + fire.second - fire.first}ms")
+            if (i == 0) {
+                releaseHeldGuard() // 정각 첫 동작을 위해 미리 열어 둔 터치 통과 상태를 닫는다
+                if (fire != null) LogStore.add("첫 동작이 나간 시각: 목표(정각-lead) 대비 ${lastDispatchAtMs + fire.second - fire.first}ms")
             }
             LogStore.add("이동 ${i + 1}/$n '${s.display()}' ${if (ok) "OK" else "못 찾음"}")
             if (!ok) {
@@ -880,7 +1060,7 @@ class MacroService : AccessibilityService() {
      * 앱을 연 직후부터 화면을 지켜보다가 정각 전에 안정이 확인되면 더 읽지 않고 정각에 바로 돌아오므로 첫 탭이 늦어지지 않는다.
      * 정각이 지나도 안정되지 않으면 Settle.START_EXTRA_MS 까지만 더 기다리고 진행한다.
      */
-    private fun waitScreenReady(job: Job, fireAt: Long, offset: Long): PageSig? {
+    private fun waitScreenReady(job: Job, fireAt: Long, offset: Long, beforeFire: (() -> Unit)? = null): PageSig? {
         val tracker = StabilityTracker(Settle.QUIET_MS)
         var last: PageSig? = null
         var waitingLogged = false
@@ -897,12 +1077,15 @@ class MacroService : AccessibilityService() {
             }
             if (stable && nowMs < fireAt) {
                 // 정각 전에 이미 안정이 확인됐다 -> 더 읽지 않고(읽다가 정각을 넘기지 않도록) 정각까지 쉬었다가 바로 반환
+                if (fireAt - (System.currentTimeMillis() + offset) > 150) waitUntil(fireAt - 120, offset)
+                beforeFire?.invoke()
                 waitUntil(fireAt, offset)
                 return last
             }
             if (nowMs >= fireAt) {
                 if (stable) {
                     if (waitingLogged) LogStore.add("앱 화면 로딩 완료 — 경로 이동 시작 (정각보다 ${nowMs - fireAt}ms 늦음)")
+                    beforeFire?.invoke()
                     return last
                 }
                 if (nowMs >= fireAt + Settle.START_EXTRA_MS) {
@@ -968,6 +1151,7 @@ class MacroService : AccessibilityService() {
 
         if (plan.launch) {
             waitUntil(launchAt, offset)
+            showRunGuard() // 앱을 여는 순간부터 사용자 터치 차단 + 긴급 정지 버튼
             if (!launch(job.pkg, fresh = plan.freshStart)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
             LogStore.add(if (hasRoute) "앱 실행(첫 화면에서 시작): ${job.pkg}" else "앱을 앞으로 가져옴(현재 화면 유지): ${job.pkg}")
             if (!waitForeground(job, 3_000)) {
@@ -976,6 +1160,8 @@ class MacroService : AccessibilityService() {
             }
         } else {
             LogStore.add("앱 실행 생략 — 대상 앱의 시작 화면에 가 있어야 합니다")
+            waitUntil(launchAt, offset)
+            showRunGuard()
         }
 
         // 정각까지 기다리되, 앱 첫 화면이 다 뜬 뒤에 경로를 시작한다 (로딩 중에 누르면 엉뚱한 화면으로 넘어감).
@@ -1001,9 +1187,11 @@ class MacroService : AccessibilityService() {
                     waitUntil(fireAt - 300, offset)
                     fastFirst = targetRoot(job) != null
                 }
+                if (fireAt - (System.currentTimeMillis() + offset) > 150) waitUntil(fireAt - 120, offset)
+                holdGuardOpen(job.steps.firstOrNull()) // 정각 첫 탭이 잠금 창에 막히지 않게 미리 통과 상태로
                 waitUntil(fireAt, offset)
             } else {
-                start = waitScreenReady(job, fireAt, offset) // 화면이 안정된 걸 확인했으면 정각까지 쉬었다가 바로 반환
+                start = waitScreenReady(job, fireAt, offset, beforeFire = { holdGuardOpen(job.steps.firstOrNull()) }) // 화면이 안정된 걸 확인했으면 정각까지 쉬었다가 바로 반환
                 fastFirst = start != null
             }
         } else {
@@ -1073,6 +1261,7 @@ class MacroService : AccessibilityService() {
             return executeAtOpen(flowJob, offset, mode)
         }
 
+        if (mode != Mode.LIVE) showRunGuard() // 테스트는 시작하자마자 잠금 (예약은 오픈 직전에 아래에서)
         if (plan.launch) {
             if (!launch(job.pkg, plan.freshStart)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
             LogStore.add(if (plan.freshStart) "앱 실행(첫 화면에서 시작): ${job.pkg}" else "앱을 앞으로 가져옴(현재 화면 유지): ${job.pkg}")
@@ -1094,6 +1283,9 @@ class MacroService : AccessibilityService() {
             val fmt = SimpleDateFormat("MM-dd HH:mm:ss", Locale.KOREA)
             LogStore.add("대기: 오픈 ${fmt.format(Date(job.openAtMillis))} (lead ${job.leadMs}ms)")
             val fireAt = Flow.timeline(job).fireAtMs
+            // 미리 이동해 두고 기다리는 방식: 오픈 5초 전부터 화면 잠금 + 긴급 정지 (그전엔 폰을 쓸 수 있다)
+            if (fireAt - (System.currentTimeMillis() + offset) > 5_500) waitUntil(fireAt - 5_000, offset)
+            showRunGuard()
             // 오래 전에 열어 둔 페이지는 낡았을 수 있어 오픈 3초 전에 한 번 새로고침
             if (plan.preRefresh && fireAt - (System.currentTimeMillis() + offset) > 3500) {
                 waitUntil(fireAt - 3000, offset)
@@ -1654,6 +1846,30 @@ class MacroService : AccessibilityService() {
         val g = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(p, 0, durationMs))
             .build()
+        // 실행 중 화면 잠금이 켜져 있으면, 이 동작을 보내는 동안만 잠금 창이 터치를 통과시킨다(미리 열어 둔 경우는 그대로)
+        if (guardOn && !guardHeld) {
+            val dm = resources.displayMetrics
+            val hits = RunGuard.stopZone(dm.widthPixels, dm.heightPixels, dm.density).touches(x1, y1, x2, y2, 8 * dm.density)
+            acquireGuardPass(hits)
+            val released = AtomicBoolean(false)
+            val release = { if (released.compareAndSet(false, true)) releaseGuardPass() }
+            val wrapped = object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    release()
+                    callback?.onCompleted(gestureDescription)
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    release()
+                    callback?.onCancelled(gestureDescription)
+                }
+            }
+            main.postDelayed({ release() }, durationMs + 1_500) // 콜백이 안 와도 잠금이 영원히 풀려 있지 않게
+            lastDispatchAtMs = System.currentTimeMillis()
+            val ok = dispatchGesture(g, wrapped, null)
+            if (!ok) release()
+            return ok
+        }
         lastDispatchAtMs = System.currentTimeMillis()
         return dispatchGesture(g, callback, null)
     }
