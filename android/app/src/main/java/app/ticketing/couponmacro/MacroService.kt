@@ -737,37 +737,38 @@ class MacroService : AccessibilityService() {
      * waitLoaded: (예전 방식) 마지막 이동 뒤 화면 로딩 완료까지 추가 대기
      * firstScreenChecked: 첫 단계의 기준 화면은 이미 기다렸음(예약 흐름에서 앱이 뜨는 동안 미리 확인)
      */
-    private fun replayRoute(job: Job, waitLoaded: Boolean, initial: PageSig? = null, firstScreenChecked: Boolean = false): Outcome? {
+    private fun replayRoute(
+        job: Job, waitLoaded: Boolean, initial: PageSig? = null, firstScreenChecked: Boolean = false,
+        route: RoutePlan = prepareRoute(job), fastFirst: Boolean = false, fire: Pair<Long, Long>? = null,
+    ): Outcome? {
         var cur: PageSig? = initial // 없으면 첫 시간 기준 대기 때 처음 읽은 화면을 기준으로 삼는다(첫 탭 전에 화면 전체를 읽느라 늦추지 않음)
         val n = job.steps.size
-        val hasRefs = job.steps.any { it.ref != null || it.endRef != null }
-        var useRefs = hasRefs && Build.VERSION.SDK_INT >= 30
-        if (hasRefs && !useRefs) LogStore.add("기준 화면은 안드로이드 11 이상에서만 사용합니다 — 시간 기준으로 진행")
-        if (useRefs) {
-            val cnt = (0 until n).count { RouteScreens.waitsBefore(job.steps, it) }
-            LogStore.add("기준 화면 사용: 원하는 화면이 뜰 때 누릅니다 (대기 ${cnt}단계${if (RouteScreens.endGrid(job.steps) != null) " + 쿠폰 화면" else ""})")
-        }
+        var useRefs = route.useRefs
         for ((i, s) in job.steps.withIndex()) {
-            if (useRefs && !(i == 0 && firstScreenChecked) && RouteScreens.waitsBefore(job.steps, i)) {
-                val ref = ScreenRef.gridOf(s.ref)
+            if (useRefs && !(i == 0 && firstScreenChecked) && route.waits[i]) {
+                val ref = route.grids[i]
                 if (ref == null || !awaitScreen(ref, s.hintX, s.hintY, "이동 ${i + 1}/$n")) {
                     useRefs = false // 화면 캡처가 안 되는 기기/상태 — 이 실행은 시간 기준으로
                     cur = settleAfterStep(job, null, Settle.minWaitMs(s.delayMs, false), "이동 ${i + 1}/$n")
                 }
             }
-            val ok = runStep(job, s, if (s.optional) 1_500 else 10_000)
+            // 첫 탭: 정각에 늦지 않도록 확인 없이 바로 누른다(앞에서 미리 확인해 둠). 기록은 누른 뒤에 남긴다
+            val ok = runStep(job, s, if (s.optional) 1_500 else 10_000, assumeForeground = i == 0 && fastFirst)
+            if (i == 0 && fire != null) {
+                LogStore.add("첫 동작이 나간 시각: 목표(정각-lead) 대비 ${lastDispatchAtMs + fire.second - fire.first}ms")
+            }
             LogStore.add("이동 ${i + 1}/$n '${s.display()}' ${if (ok) "OK" else "못 찾음"}")
             if (!ok) {
                 if (!s.optional) return Outcome("error", 0, "이동 단계 실패: ${s.display()}")
                 continue // 없어도 되는 단계(팝업 닫기 등)가 안 보이면 화면이 안 바뀌었으니 기다릴 것 없이 다음으로
             }
             val last = i == n - 1
-            if (useRefs && !last && RouteScreens.waitsBefore(job.steps, i + 1)) {
+            if (useRefs && !last && route.waits[i + 1]) {
                 cur = null // 다음 단계가 '원하는 화면'이 뜰 때까지 기다린다
                 continue
             }
             if (useRefs && last) {
-                val end = RouteScreens.endGrid(job.steps)
+                val end = route.end
                 if (end != null) {
                     if (awaitScreen(end, null, null, "쿠폰 화면")) continue
                     useRefs = false
@@ -777,6 +778,24 @@ class MacroService : AccessibilityService() {
         }
         if (waitLoaded && n > 0) waitForLoaded(job, "이동 완료") // 예전 방식: 쿠폰 선택은 화면 로딩이 끝난 뒤에
         return null
+    }
+
+    /** 경로 재생에 필요한 계산(기준 화면 해석, 기다릴 단계)을 미리 해 둔 것 — 정각에 무거운 계산을 하지 않도록 정각 전에 만든다 */
+    private class RoutePlan(val steps: List<Step>) {
+        val grids: List<IntArray?> = steps.map { ScreenRef.gridOf(it.ref) }
+        val waits: List<Boolean> = steps.indices.map { RouteScreens.waitsBefore(steps, it) }
+        val end: IntArray? = RouteScreens.endGrid(steps)
+        val hasRefs: Boolean = steps.any { it.ref != null || it.endRef != null }
+        val useRefs: Boolean = hasRefs && Build.VERSION.SDK_INT >= 30
+    }
+
+    private fun prepareRoute(job: Job): RoutePlan {
+        val r = RoutePlan(job.steps)
+        if (r.hasRefs && !r.useRefs) LogStore.add("기준 화면은 안드로이드 11 이상에서만 사용합니다 — 시간 기준으로 진행")
+        if (r.useRefs) {
+            LogStore.add("기준 화면 사용: 원하는 화면이 뜰 때 누릅니다 (대기 ${r.waits.count { it }}단계${if (r.end != null) " + 쿠폰 화면" else ""})")
+        }
+        return r
     }
 
     /**
@@ -852,11 +871,10 @@ class MacroService : AccessibilityService() {
 
     /**
      * 정각(fireAt)이 되고, 앱 첫 화면이 다 뜰 때까지(로딩 표시 없음 + 내용이 0.5초 안정) 기다린 뒤 돌아온다.
-     * 정각 전에는 계속 화면을 지켜보다가 정각에 이미 안정돼 있으면 바로 넘어가므로 첫 탭이 늦어지지 않는다.
+     * 앱을 연 직후부터 화면을 지켜보다가 정각 전에 안정이 확인되면 더 읽지 않고 정각에 바로 돌아오므로 첫 탭이 늦어지지 않는다.
      * 정각이 지나도 안정되지 않으면 Settle.START_EXTRA_MS 까지만 더 기다리고 진행한다.
      */
     private fun waitScreenReady(job: Job, fireAt: Long, offset: Long): PageSig? {
-        if (fireAt - (System.currentTimeMillis() + offset) > 1_500) waitUntil(fireAt - 1_500, offset)
         val tracker = StabilityTracker(Settle.QUIET_MS)
         var last: PageSig? = null
         var waitingLogged = false
@@ -870,6 +888,11 @@ class MacroService : AccessibilityService() {
             } else {
                 last = sig
                 tracker.update(sig.hash, sig.loading, sig.hasContent, SystemClock.elapsedRealtime())
+            }
+            if (stable && nowMs < fireAt) {
+                // 정각 전에 이미 안정이 확인됐다 -> 더 읽지 않고(읽다가 정각을 넘기지 않도록) 정각까지 쉬었다가 바로 반환
+                waitUntil(fireAt, offset)
+                return last
             }
             if (nowMs >= fireAt) {
                 if (stable) {
@@ -893,9 +916,9 @@ class MacroService : AccessibilityService() {
      * 이동 단계 하나 실행.
      * 글자 단계: 글자가 보이면 클릭(위치 힌트가 있으면 같은 글자 중 힌트에 가장 가까운 것), 아이콘 단계: 저장한 화면 비율 위치를 탭.
      */
-    private fun runStep(job: Job, s: Step, timeoutMs: Long): Boolean {
+    private fun runStep(job: Job, s: Step, timeoutMs: Long, assumeForeground: Boolean = false): Boolean {
         if (s.isSwipe || s.isTap) {
-            if (!waitForeground(job, timeoutMs)) return false
+            if (!assumeForeground && !waitForeground(job, timeoutMs)) return false
             val dm = resources.displayMetrics
             val fx = s.hintX ?: return false
             val fy = s.hintY ?: return false
@@ -944,21 +967,42 @@ class MacroService : AccessibilityService() {
             LogStore.add("앱 실행 생략 — 대상 앱의 시작 화면에 가 있어야 합니다")
         }
 
-        // 정각까지 기다리되, 앱 첫 화면이 다 뜬 뒤에 경로를 시작한다 (로딩 중에 누르면 엉뚱한 화면으로 넘어감)
+        // 정각까지 기다리되, 앱 첫 화면이 다 뜬 뒤에 경로를 시작한다 (로딩 중에 누르면 엉뚱한 화면으로 넘어감).
+        // 무거운 일(기준 화면 해석, 화면 확인, 앱이 앞에 있는지 확인)은 전부 정각 전에 끝내 두고, 정각에는 곧바로 누르기만 한다.
         var start: PageSig? = null
         var firstChecked = false
+        var fastFirst = false
+        var route: RoutePlan? = null
         if (plan.replayRoute) {
+            route = prepareRoute(job)
             // 앱이 뜨는 동안 '기록 때 첫 화면'이 나타나는지 미리 지켜본다 (정각 전에 확인이 끝나 있으면 정각에 바로 시작)
             val s0 = job.steps.firstOrNull()
-            if (s0 != null && Build.VERSION.SDK_INT >= 30 && RouteScreens.waitsBefore(job.steps, 0)) {
-                firstChecked = ScreenRef.gridOf(s0.ref)?.let { awaitScreen(it, s0.hintX, s0.hintY, "앱 첫 화면") } == true
+            val g0 = route.grids.firstOrNull()
+            if (s0 != null && route.useRefs && route.waits[0] && g0 != null) {
+                firstChecked = awaitScreen(g0, s0.hintX, s0.hintY, "앱 첫 화면")
             }
-            if (firstChecked) waitUntil(fireAt, offset) else start = waitScreenReady(job, fireAt, offset) // 화면을 이미 확인했으면 정각만 기다림
+            if (firstChecked) {
+                // 정각 0.3초 전에 대상 앱이 앞에 있는지만 가볍게 확인 -> 정각에는 확인 없이 바로 누름
+                if (fireAt - (System.currentTimeMillis() + offset) > 400) {
+                    waitUntil(fireAt - 300, offset)
+                    fastFirst = targetRoot(job) != null
+                }
+                waitUntil(fireAt, offset)
+            } else {
+                start = waitScreenReady(job, fireAt, offset) // 화면이 안정된 걸 확인했으면 정각까지 쉬었다가 바로 반환
+                fastFirst = start != null
+            }
         } else {
             waitUntil(fireAt, offset)
         }
-        LogStore.add(if (mode == Mode.LIVE) "정각 — 경로 이동 시작" else "앱 실행 후 ${(fireAt - launchAt) / 1000.0}초 경과 — 경로 이동 시작")
-        if (plan.replayRoute) replayRoute(job, waitLoaded = plan.waitLoadedBetweenSteps, initial = start, firstScreenChecked = firstChecked)?.let { return it }
+        if (route != null) {
+            replayRoute(
+                job, waitLoaded = plan.waitLoadedBetweenSteps, initial = start, firstScreenChecked = firstChecked,
+                route = route, fastFirst = fastFirst, fire = fireAt to offset,
+            )?.let { return it }
+        } else {
+            LogStore.add(if (mode == Mode.LIVE) "정각 — 쿠폰 선택 시작" else "앱 실행 후 ${(fireAt - launchAt) / 1000.0}초 경과")
+        }
         // 쿠폰 이미지/카드가 화면에 뜨는 즉시 선택한다 (별도 로딩 대기 없음: 클릭 루프가 대상이 보일 때까지 빠르게 확인)
         LogStore.add("경로 이동 끝 — 쿠폰 선택 시작")
         return clickLoop(job, mode)
@@ -1568,6 +1612,9 @@ class MacroService : AccessibilityService() {
         return out
     }
 
+    /** 마지막으로 동작(탭/스와이프)을 시스템에 보낸 시각(epoch ms) — 정각 대비 지연 확인용 */
+    @Volatile private var lastDispatchAtMs = 0L
+
     private fun gesture(
         x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long,
         callback: AccessibilityService.GestureResultCallback? = null,
@@ -1579,6 +1626,7 @@ class MacroService : AccessibilityService() {
         val g = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(p, 0, durationMs))
             .build()
+        lastDispatchAtMs = System.currentTimeMillis()
         return dispatchGesture(g, callback, null)
     }
 
