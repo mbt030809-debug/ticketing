@@ -1115,13 +1115,20 @@ class MacroService : AccessibilityService() {
             val y = fy * dm.heightPixels
             val ex = (s.endX ?: fx) * dm.widthPixels
             val ey = (s.endY ?: fy) * dm.heightPixels
-            val dur = if (s.isSwipe) Gestures.replayDurationMs(s.durMs, job.swipeSpeed) else (s.durMs ?: Gestures.TAP_MS)
             // 동작이 끝난 뒤에 돌아온다: 끝나기 전에 다음 동작을 보내면 앞 동작(스크롤 등)이 중간에 취소되기 때문
-            val ok = gestureAndWait(x, y, ex, ey, dur)
-            if (ok) showDot(x, y, Color.RED)
+            val ok: Boolean
             if (s.isSwipe) {
-                LogStore.add("스크롤 ${if (ok) "실행" else "실패"}: ${dur}ms (기록 ${s.durMs ?: "-"}ms ÷ ${job.swipeSpeed}배)")
+                // 스크롤: 손가락 이동은 빠르게, 떼는 속도는 기록 그대로(= 스크롤 거리 같음)
+                val segs = Gestures.swipeSegments(x, y, ex, ey, s.durMs, job.swipeSpeed)
+                ok = swipeAndWait(segs)
+                LogStore.add(
+                    "스크롤 ${if (ok) "실행" else "실패"}: ${segs.sumOf { it.durMs }}ms" +
+                        " (기록 ${s.durMs ?: "-"}ms, ${job.swipeSpeed}배${if (segs.size > 1) ", 떼는 속도는 기록 그대로" else ""})",
+                )
+            } else {
+                ok = gestureAndWait(x, y, ex, ey, s.durMs ?: Gestures.TAP_MS)
             }
+            if (ok) showDot(x, y, Color.RED)
             return ok
         }
         return waitAndClick(job, s.text, timeoutMs, s.hintX, s.hintY)
@@ -1816,6 +1823,62 @@ class MacroService : AccessibilityService() {
             out[r * ScreenRef.COLS + c] = sum / (cell * cell)
         }
         return out
+    }
+
+    /**
+     * 손가락을 떼지 않고 이어지는 여러 구간의 스와이프를 보내고 끝날 때까지 기다린다.
+     * 구간마다 따로 dispatchGesture 하되, 앞 구간은 willContinue 로 손가락을 누른 채 두고 다음 구간을 continueStroke 로 이어 붙인다.
+     * 구간이 하나면 일반 동작과 같다.
+     */
+    private fun swipeAndWait(segs: List<Gestures.Seg>): Boolean {
+        if (segs.size == 1) {
+            val s = segs[0]
+            return gestureAndWait(s.x1, s.y1, s.x2, s.y2, s.durMs)
+        }
+        val ownsPass = guardOn && !guardHeld
+        if (ownsPass) {
+            val dm = resources.displayMetrics
+            val zone = RunGuard.stopZone(dm.widthPixels, dm.heightPixels, dm.density)
+            val hits = segs.any { zone.touches(it.x1, it.y1, it.x2, it.y2, 8 * dm.density) }
+            acquireGuardPass(hits)
+        }
+        val finished = CountDownLatch(1)
+        var okAll = true
+        fun send(i: Int, prev: GestureDescription.StrokeDescription?) {
+            val s = segs[i]
+            val last = i == segs.lastIndex
+            val path = Path().apply {
+                moveTo(s.x1, s.y1)
+                lineTo(s.x2, s.y2)
+            }
+            val stroke = if (prev == null) {
+                GestureDescription.StrokeDescription(path, 0, s.durMs, !last)
+            } else {
+                prev.continueStroke(path, 0, s.durMs, !last)
+            }
+            val cb = object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    if (last) finished.countDown() else send(i + 1, stroke)
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    okAll = false
+                    finished.countDown()
+                }
+            }
+            if (i == 0) lastDispatchAtMs = System.currentTimeMillis()
+            if (!dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), cb, null)) {
+                okAll = false
+                finished.countDown()
+            }
+        }
+        try {
+            send(0, null)
+            finished.await(segs.sumOf { it.durMs } + 2_000, TimeUnit.MILLISECONDS)
+        } finally {
+            if (ownsPass) releaseGuardPass()
+        }
+        return okAll
     }
 
     /** 동작을 보내고 끝날 때까지(최대 길이+0.8초) 기다린다. 못 보내면 false */

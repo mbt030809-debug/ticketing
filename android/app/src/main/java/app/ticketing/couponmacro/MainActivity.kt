@@ -198,7 +198,7 @@ class MainActivity : Activity() {
             routeAtOpenCb = CheckBox(this).apply { text = "경로 이동을 오픈 정각에 시작 (끄면 미리 이동해 두고 대기)" }
             b.addView(routeAtOpenCb)
             field(b, K_LAUNCH, "앱 실행 시점: 오픈 몇 초 전 (0~600, 기본 5)")
-            field(b, K_SWIPE, "스크롤 속도: 기록한 속도의 몇 배 (0.5~8, 기본 2 — 너무 멀리 넘어가면 낮추기)")
+            field(b, K_SWIPE, "스크롤 속도: 손가락 이동을 기록의 몇 배 빠르게 (0.5~8, 기본 2 — 스크롤 거리는 그대로)")
             field(b, K_WARN, "자동 실행 알람: 회차 몇 초 전에 울릴지 (20~600, 기본 60)")
             field(b, K_LEAD, "미리 누르기 lead (ms)")
             field(b, K_INTERVAL, "재시도 간격 (ms)")

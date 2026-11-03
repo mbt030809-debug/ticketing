@@ -20,6 +20,38 @@ class GesturesTest {
     }
 
     @Test
+    fun fasterScrollKeepsTheReleaseSpeedSoTheScrollDistanceStaysTheSame() {
+        // 위로 1000px 를 0.6초에 쓸어 올린 스크롤을 2배 빠르게
+        val segs = Gestures.swipeSegments(500f, 1800f, 500f, 800f, 600, 2f)
+        assertEquals(2, segs.size)
+        val (main, tail) = segs
+        // 손가락은 떼지 않고 이어진다: 앞 구간 끝 = 뒤 구간 시작, 전체 시작/끝은 기록과 같다
+        assertEquals(main.x2, tail.x1, 0f)
+        assertEquals(main.y2, tail.y1, 0f)
+        assertEquals(1800f, main.y1, 0.01f)
+        assertEquals(800f, tail.y2, 0.01f)
+        // 뗄 때 속도(마지막 구간) = 기록의 평균 속도 -> 관성이 같아 스크롤 거리가 같다
+        val originalSpeed = 1000f / 600f                       // px/ms
+        val tailSpeed = (tail.y1 - tail.y2) / tail.durMs
+        assertEquals(originalSpeed, tailSpeed, 0.01f)
+        // 앞 구간은 2배 빠르게 움직인다 -> 전체 시간은 줄어든다
+        val mainSpeed = (main.y1 - main.y2) / main.durMs
+        assertEquals(originalSpeed * 2, mainSpeed, 0.05f)
+        assertTrue(segs.sumOf { it.durMs } < 600)
+        // 손가락 이동 거리 합 = 기록과 같은 1000px
+        assertEquals(1000f, (main.y1 - main.y2) + (tail.y1 - tail.y2), 0.01f)
+    }
+
+    @Test
+    fun slowOrShortScrollsStaySingleStroke() {
+        assertEquals(1, Gestures.swipeSegments(0f, 0f, 0f, 500f, 600, 1f).size)   // 1배: 기록 그대로
+        assertEquals(1, Gestures.swipeSegments(0f, 0f, 0f, 500f, 600, 0.5f).size) // 느리게
+        assertEquals(1, Gestures.swipeSegments(0f, 0f, 0f, 500f, 150, 3f).size)   // 너무 짧은 동작
+        assertEquals(1200L, Gestures.swipeSegments(0f, 0f, 0f, 500f, 600, 0.5f)[0].durMs)
+        assertEquals(2, Gestures.swipeSegments(0f, 0f, 0f, 500f, 600, 8f).size)
+    }
+
+    @Test
     fun emptyTouchIsIgnored() {
         assertNull(Gestures.classify(emptyList(), slop))
     }
