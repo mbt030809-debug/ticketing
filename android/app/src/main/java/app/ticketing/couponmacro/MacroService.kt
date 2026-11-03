@@ -950,12 +950,19 @@ class MacroService : AccessibilityService() {
     private fun runJob(job: Job, mode: Mode) {
         runningOpenAtMs = if (mode == Mode.LIVE) job.openAtMillis else 0L
         screenMatchedAt = 0L
+        timeline = null
+        runOffset = 0L
         dots = job.showDots
         acquireWakeLock(Flow.wakeLockMs(job, mode, System.currentTimeMillis()))
         setKeepScreenOn(true)
         try {
             LogStore.add("== 시작: ${job.name} [${mode.name}] ==")
             val out = execute(job, mode)
+            tlMark("결과")
+            timeline?.let {
+                LogStore.add("⏱ 타임라인(정각=0): ${it.summary()}")
+                LogStore.add("⏱ ${it.stats()}")
+            }
             LogStore.add("결과: ${out.status} (시도 ${out.attempts}회) ${out.detail}")
             notifyResult(job.name, label(out.status) + if (out.detail.isNotEmpty()) " — ${out.detail}" else "")
         } catch (e: InterruptedException) {
@@ -1009,6 +1016,7 @@ class MacroService : AccessibilityService() {
                 releaseHeldGuard() // 정각 첫 동작을 위해 미리 열어 둔 터치 통과 상태를 닫는다
                 if (fire != null) LogStore.add("첫 동작이 나간 시각: 목표(정각-lead) 대비 ${lastDispatchAtMs + fire.second - fire.first}ms")
             }
+            if (ok) tlMark("이동${i + 1}", if (s.isTap || s.isSwipe) lastDispatchAtMs else System.currentTimeMillis())
             LogStore.add("이동 ${i + 1}/$n '${s.display()}' ${if (ok) "OK" else "못 찾음"}")
             if (!ok) {
                 if (!s.optional) return Outcome("error", 0, "이동 단계 실패: ${s.display()}")
@@ -1224,6 +1232,8 @@ class MacroService : AccessibilityService() {
         val tl = Flow.timeline(job)
         val launchAt = tl.launchAtMs
         val fireAt = tl.fireAtMs
+        timeline = RunTimeline(fireAt) // 정각(목표 시각)을 0으로 각 단계 시각을 기록
+        runOffset = offset
         val waitMin = (launchAt - (System.currentTimeMillis() + offset)) / 60_000
         if (waitMin >= 10) {
             LogStore.add("오픈까지 ${waitMin}분 — 그동안 화면이 켜진 채로 유지됩니다 (자동 실행(알람)을 켜면 폰을 잠가 둬도 됩니다)")
@@ -1238,6 +1248,7 @@ class MacroService : AccessibilityService() {
             waitUntil(launchAt, offset)
             showRunGuard() // 앱을 여는 순간부터 사용자 터치 차단 + 긴급 정지 버튼
             if (!launch(job.pkg, fresh = plan.freshStart)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
+            tlMark("앱 실행")
             LogStore.add(if (hasRoute) "앱 실행(첫 화면에서 시작): ${job.pkg}" else "앱을 앞으로 가져옴(현재 화면 유지): ${job.pkg}")
             if (!waitForeground(job, 3_000)) {
                 LogStore.add("대상 앱이 자동으로 열리지 않았습니다 (백그라운드 실행 제한일 수 있음) — 직접 열어 주세요")
@@ -1262,6 +1273,7 @@ class MacroService : AccessibilityService() {
             val g0 = route.grids.firstOrNull()
             if (s0 != null && route.useRefs && route.waits[0] && g0 != null) {
                 firstChecked = awaitScreen(g0, s0.hintX, s0.hintY, "앱 첫 화면") != null
+                if (firstChecked) tlMark("첫 화면 확인")
             }
             if (firstChecked) {
                 // 정각 0.3초 전에 대상 앱이 앞에 있는지만 가볍게 확인 -> 정각에는 확인 없이 바로 누름
@@ -1274,6 +1286,7 @@ class MacroService : AccessibilityService() {
                 waitUntil(fireAt, offset)
             } else {
                 start = waitScreenReady(job, fireAt, offset, beforeFire = { holdGuardOpen(job.steps.firstOrNull()) }) // 화면이 안정된 걸 확인했으면 정각까지 쉬었다가 바로 반환
+                tlMark("첫 화면 안정(정각 도달)")
                 fastFirst = start != null
             }
         } else {
@@ -1284,6 +1297,7 @@ class MacroService : AccessibilityService() {
                 job, waitLoaded = plan.waitLoadedBetweenSteps, initial = start, firstScreenChecked = firstChecked,
                 route = route, fastFirst = fastFirst, fire = fireAt to offset,
             )?.let { return it }
+            tlMark("경로 끝")
         } else {
             LogStore.add(if (mode == Mode.LIVE) "정각 — 쿠폰 선택 시작" else "앱 실행 후 ${(fireAt - launchAt) / 1000.0}초 경과")
         }
@@ -1304,6 +1318,7 @@ class MacroService : AccessibilityService() {
                 offset = o
                 LogStore.add("NTP 오프셋 ${o}ms")
             }
+            runOffset = offset
             if (job.openAtMillis - (System.currentTimeMillis() + offset) < -Schedule.GRACE_MS) {
                 return Outcome("error", 0, "오픈 시각이 이미 지났습니다")
             }
@@ -1445,6 +1460,7 @@ class MacroService : AccessibilityService() {
                             } else {
                                 val t0 = SystemClock.elapsedRealtime()
                                 val ok = clickNode((m.button as AxNode).raw)
+                                if (ok) timeline?.markOnce("첫 쿠폰 클릭", System.currentTimeMillis() + runOffset)
                                 LogStore.add("#$attempt [$entry] 클릭 ${if (ok) "OK" else "실패"}")
                                 if (ok) {
                                     clicked += entry
@@ -1560,6 +1576,7 @@ class MacroService : AccessibilityService() {
         }
         val ok = gesture(pt.first, pt.second, pt.first, pt.second, 40)
         if (ok) {
+            timeline?.markOnce("첫 쿠폰 클릭", lastDispatchAtMs + runOffset)
             st.clicks++
             st.lastAt = SystemClock.elapsedRealtime()
             showDot(pt.first, pt.second, Color.RED)
@@ -1995,6 +2012,16 @@ class MacroService : AccessibilityService() {
         )
         if (ok) done.await(durationMs + 800, TimeUnit.MILLISECONDS)
         return ok
+    }
+
+    /** 이번 실행의 타임라인(정각=0). 정각에 경로로 바로 들어가는지, 몇 초 걸리는지 로그로 남긴다 */
+    @Volatile private var timeline: RunTimeline? = null
+
+    /** NTP 보정값(ms): 기기 시계 + 이 값 = 실제 시각 */
+    @Volatile private var runOffset = 0L
+
+    private fun tlMark(label: String, atDeviceMs: Long = System.currentTimeMillis()) {
+        timeline?.mark(label, atDeviceMs + runOffset)
     }
 
     /** 원하는 화면이 떴다고 마지막으로 확인한 시각(elapsedRealtime) — 그로부터 afterScreenMs 뒤에 누른다 */
