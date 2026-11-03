@@ -42,6 +42,12 @@ class RunTimeline(private val t0Ms: Long) {
     }
 
     companion object {
+        /**
+         * 화면에 띄우는 시계의 '초' 값: 정각(오픈 시각)=0 기준, 내림. 앱 시작이 10초 전이면 -10, -9, … -1, 0, 1, 2 …
+         * (-10 은 정각 10초 전 ~ 9초 전 사이, 0 은 정각 ~ 1초 뒤)
+         */
+        fun clockSecond(relMs: Long): Long = Math.floorDiv(relMs, 1000L)
+
         private fun secs(ms: Long): String = String.format(java.util.Locale.ROOT, "%.2f", abs(ms) / 1000.0)
 
         /** +1.23s / -4.98s (정각 전은 -, 후는 +) */

@@ -82,6 +82,7 @@ class MacroService : AccessibilityService() {
     override fun onUnbind(intent: Intent?): Boolean {
         cancel()
         hideRunGuard()
+        hideRunClock()
         if (recordPkg != null) {
             recordPkg = null
             hideRecordOverlay()
@@ -132,6 +133,104 @@ class MacroService : AccessibilityService() {
         worker?.interrupt()
         hidePick()
         hideRunGuard()
+        hideRunClock()
+    }
+
+    // ---- 실행 시계: 정각을 0으로 -10 -9 … 0 1 2 … 화면에 표시 (테스트·예약) ----
+    private var clockView: TextView? = null
+    @Volatile private var clockOn = false
+    @Volatile private var clockOpenAt = 0L
+    private var clockLast = Long.MIN_VALUE
+
+    private val clockTick = object : Runnable {
+        override fun run() {
+            if (!clockOn) return
+            val v = clockView
+            if (v != null) {
+                val sec = RunTimeline.clockSecond(System.currentTimeMillis() + runOffset - clockOpenAt)
+                if (sec != clockLast) {
+                    clockLast = sec
+                    v.text = "정각 $sec"
+                    v.setTextColor(if (sec < 0) Color.WHITE else if (sec == 0L) 0xFF69F0AE.toInt() else 0xFFFFD54F.toInt())
+                }
+            }
+            main.postDelayed(this, 40)
+        }
+    }
+
+    /**
+     * 정각(openAtMs)을 0으로 한 시계를 화면 위(왼쪽 위)에 띄운다. 앱을 시작하는 순간부터 -10, -9, … -1, 0(정각), 1, 2 … 로 올라간다.
+     * 터치를 가로채지 않는 작은 창이고, 상태 표시줄 높이 안에 있어 기준 화면 비교(위쪽 칸 제외)에 영향이 없다.
+     */
+    private fun showRunClock(openAtMs: Long) {
+        clockOpenAt = openAtMs
+        clockLast = Long.MIN_VALUE
+        clockOn = true
+        main.post {
+            if (!clockOn) return@post
+            if (clockView != null) { // 앞 실행의 시계가 아직 남아 있으면 그대로 다시 올라가게
+                main.removeCallbacks(clockTick)
+                main.post(clockTick)
+                return@post
+            }
+            try {
+                val tv = TextView(this).apply {
+                    text = "정각 -"
+                    setTextColor(Color.WHITE)
+                    textSize = 17f
+                    paint.isFakeBoldText = true
+                    setPadding(dp(10), dp(1), dp(10), dp(1))
+                    background = GradientDrawable().apply {
+                        setColor(0xB3000000.toInt())
+                        cornerRadius = dp(8).toFloat()
+                    }
+                }
+                val lp = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    PixelFormat.TRANSLUCENT,
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.START
+                    x = dp(8)
+                    y = dp(2)
+                }
+                (getSystemService(WINDOW_SERVICE) as WindowManager).addView(tv, lp)
+                clockView = tv
+                main.post(clockTick)
+            } catch (e: Exception) {
+                LogStore.add("시계 표시 실패: $e")
+            }
+        }
+    }
+
+    /** 실행이 끝나면 마지막 값을 잠깐(3초) 보여 주고 지운다. finalText 가 있으면 그 글자로 바꿔서 보여 준다 */
+    private fun finishRunClock(finalText: String?) {
+        if (!clockOn) return
+        clockOn = false // 더 이상 올라가지 않는다
+        main.post {
+            if (finalText != null) clockView?.text = finalText
+            main.postDelayed({ removeRunClock() }, 3_000)
+        }
+    }
+
+    private fun hideRunClock() {
+        clockOn = false
+        main.post { removeRunClock() }
+    }
+
+    private fun removeRunClock() {
+        if (clockOn) return // 그 사이 새 실행이 시작됐으면 지우지 않는다
+        try {
+            val v = clockView
+            if (v != null) (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(v)
+        } catch (_: Exception) {
+        }
+        clockView = null
     }
 
     // ---- 실행 중 화면 잠금(사용자 터치 차단) + 긴급 정지 버튼 ----
@@ -971,6 +1070,7 @@ class MacroService : AccessibilityService() {
             LogStore.add("== 시작: ${job.name} [${mode.name}] ==")
             val out = execute(job, mode)
             tlMark("결과")
+            finishRunClock("끝 " + RunTimeline.fmt(System.currentTimeMillis() + runOffset - clockOpenAt))
             timeline?.let {
                 LogStore.add("⏱ 타임라인(정각=0): ${it.summary()}")
                 LogStore.add("⏱ ${it.stats()}")
@@ -979,9 +1079,11 @@ class MacroService : AccessibilityService() {
             notifyResult(job.name, label(out.status) + if (out.detail.isNotEmpty()) " — ${out.detail}" else "")
         } catch (e: InterruptedException) {
             LogStore.add("취소됨")
+            hideRunClock()
         } catch (e: Exception) {
             LogStore.add("오류: $e")
             notifyResult(job.name, "오류: ${e.message}")
+            hideRunClock()
         } finally {
             runningOpenAtMs = 0L
             hideRunGuard()
@@ -1277,6 +1379,7 @@ class MacroService : AccessibilityService() {
         showRunGuard() // 앱을 여는 순간부터 사용자 터치 차단 + 긴급 정지 버튼
         if (!startTarget(job)) return Outcome("error", 0, "앱 실행 실패: ${job.pkg} (패키지명 확인)")
         tlMark("앱 실행")
+        showRunClock(job.openAtMillis) // 정각을 0으로: -10 -9 … 0 1 2 …
         LogStore.add("앱 새로 시작(종료 후 첫 화면부터, 기록·위치 지정·테스트·예약 모두 같은 방식): ${job.pkg}")
         if (!waitForeground(job, 3_000)) {
             LogStore.add("대상 앱이 자동으로 열리지 않았습니다 (백그라운드 실행 제한일 수 있음) — 직접 열어 주세요")

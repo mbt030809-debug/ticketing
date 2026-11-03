@@ -35,6 +35,23 @@ class RunTimelineTest {
     }
 
     @Test
+    fun onScreenClockCountsFromMinusTenThroughZeroUpwards() {
+        // "10초 먼저 시작이면 -10 -9 … 0 1 2": 정각(=0)을 기준으로 내림한 초
+        assertEquals(-10L, RunTimeline.clockSecond(-10_000))
+        assertEquals(-10L, RunTimeline.clockSecond(-9_500))
+        assertEquals(-9L, RunTimeline.clockSecond(-9_000))
+        assertEquals(-1L, RunTimeline.clockSecond(-1))
+        assertEquals(0L, RunTimeline.clockSecond(0))      // 정각 순간부터 0
+        assertEquals(0L, RunTimeline.clockSecond(999))
+        assertEquals(1L, RunTimeline.clockSecond(1_000))
+        assertEquals(2L, RunTimeline.clockSecond(2_345))
+        assertEquals(-11L, RunTimeline.clockSecond(-10_001))
+        // 값이 바뀌는 시각은 정확히 정각의 정수 초 — 10초 전부터 정각까지 시계는 -10, -9, …, -1, 0 순서로 11번 바뀐다
+        val seq = (-10_000L..0L step 500L).map { RunTimeline.clockSecond(it) }.distinct()
+        assertEquals((-10L..0L).toList(), seq)
+    }
+
+    @Test
     fun emptyTimelineSaysSo() {
         val tl = RunTimeline(t0)
         assertEquals("", tl.summary())
