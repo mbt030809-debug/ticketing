@@ -41,11 +41,15 @@ class AlarmReceiver : BroadcastReceiver() {
         }
 
         val title = "⏰ ${profile.label}"
-        Alerts.warn(
+        val warnSec = WarnLead.clamp(form.warnSec.trim().toIntOrNull())
+        // 알림은 오픈 시각까지 남겨 둔다(10분 전 알람도 오픈 때까지 보이게). 이어폰이 연결돼 있으면 이어폰으로도 소리가 난다
+        val ear = Alerts.warn(
             ctx,
             "$title — ${Schedule.describe(occ, now)}",
-            "지금 화면 잠금을 해제하고 폰을 켜 두세요. 앱이 자동으로 열려 쿠폰 페이지로 이동합니다.",
+            "지금 화면 잠금을 해제하고 폰을 켜 두세요(${WarnLead.label(warnSec)} 알람). 앱이 자동으로 열려 쿠폰 페이지로 이동합니다.",
+            timeoutMs = (warnSec + 30) * 1000L,
         )
+        LogStore.add("[자동] 알람 울림(${WarnLead.label(warnSec)})" + if (ear != null) " · 이어폰($ear)으로도 소리" else " · 이어폰 없음(스피커/벨소리)")
 
         val parsed = form.copy(openAt = Schedule.formatOpenAt(occ)).toJob(requireOpenAt = true)
         val job = parsed.job?.copy(awaitUnlock = true)

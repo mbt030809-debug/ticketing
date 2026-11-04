@@ -1471,6 +1471,7 @@ class MacroService : AccessibilityService() {
             val deadline = job.openAtMillis - 8_000
             var reminded = false
             var lastLog = 0L
+            var lastNag = SystemClock.elapsedRealtime()
             LogStore.add("잠금 해제 대기 중 — 화면 잠금을 풀어 주세요")
             while (isLocked()) {
                 checkCancel()
@@ -1481,6 +1482,14 @@ class MacroService : AccessibilityService() {
                 if (!reminded && remain < 35_000) {
                     reminded = true
                     Alerts.warn(this, "🔒 아직 잠겨 있어요!", "지금 잠금을 해제하세요 — 오픈까지 ${remain / 1000}초")
+                }
+                // 알람을 10분 전에 울렸다면 한동안 잠금이 안 풀릴 수 있다 -> 1분마다 다시 알린다(이어폰이 있으면 이어폰으로도)
+                if (SystemClock.elapsedRealtime() - lastNag >= 60_000 && remain > 40_000) {
+                    lastNag = SystemClock.elapsedRealtime()
+                    Alerts.warn(
+                        this, "🔒 잠금을 해제하세요",
+                        "오픈까지 ${remain / 60_000}분 ${(remain / 1000) % 60}초 — 화면 잠금을 풀어야 앱이 자동으로 열립니다",
+                    )
                 }
                 if (SystemClock.elapsedRealtime() - lastLog > 10_000) {
                     lastLog = SystemClock.elapsedRealtime()

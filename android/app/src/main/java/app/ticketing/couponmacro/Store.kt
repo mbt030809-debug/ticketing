@@ -51,7 +51,7 @@ object Store {
         if (!f.autoRun) {
             emptyList()
         } else {
-            val warn = f.warnSec.trim().toIntOrNull()?.coerceIn(20, 600) ?: 60
+            val warn = WarnLead.clamp(f.warnSec.trim().toIntOrNull())
             Schedule.enabled(f.slots, f.slotsOff).map { AutoEntry(pr.id, it, warn) }
         }
     }

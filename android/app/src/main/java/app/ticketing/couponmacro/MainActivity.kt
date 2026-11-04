@@ -17,12 +17,15 @@ import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import java.io.File
@@ -46,6 +49,7 @@ class MainActivity : Activity() {
     private lateinit var timesBox: LinearLayout
     private lateinit var nextLine: TextView
     private lateinit var autoCb: CheckBox
+    private lateinit var warnSpinner: Spinner
     private lateinit var autoLine: TextView
     private lateinit var routeLine: TextView
     private lateinit var couponNote: TextView
@@ -101,7 +105,7 @@ class MainActivity : Activity() {
         root.addView(button("＋ 시각 추가") { addSlot() })
         nextLine = TextView(this).apply { setPadding(0, dp(8), 0, 0) }
         root.addView(nextLine)
-        autoCb = CheckBox(this).apply { text = "예약 켜짐: 매일 켜진 시각에 자동 실행 (1분 전 잠금 해제 알람)" }
+        autoCb = CheckBox(this).apply { text = "예약 켜짐: 매일 켜진 시각에 자동 실행 (아래 시점에 잠금 해제 알람)" }
         autoCb.setOnCheckedChangeListener { _, _ ->
             if (!loading) {
                 saveCurrent()
@@ -110,12 +114,33 @@ class MainActivity : Activity() {
             }
         }
         root.addView(autoCb)
+        // 알람 시점: 30초~10분 전 (이어폰이 연결돼 있으면 이어폰으로도 소리가 난다)
+        warnSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, WarnLead.OPTIONS_SEC.map { WarnLead.label(it) })
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    if (!loading) {
+                        saveCurrent() // 알람 시점이 바뀌면 다음 알람을 다시 건다
+                        refreshNext()
+                    }
+                }
+
+                override fun onNothingSelected(parent: AdapterView<*>?) {}
+            }
+        }
+        root.addView(
+            row(
+                TextView(this).apply { text = "알람 시점:"; setPadding(0, 0, dp(8), 0) },
+                warnSpinner,
+                button("🔔 알림 소리 테스트") { testAlert() },
+            ),
+        )
         autoLine = TextView(this).apply { textSize = 13f }
         root.addView(autoLine)
         root.addView(
             note(
-                "시각은 2개든 4개든 자유롭게 추가·삭제하고, 체크로 켜고 끕니다. 자동 실행을 켜면 켜진 시각 1분 전에 알람이 울립니다 — " +
-                    "그때 화면 잠금을 풀고 폰을 켜 두세요. 앱이 자동으로 열려 경로를 따라 이동하고 오픈 시각에 누릅니다. " +
+                "시각은 2개든 4개든 자유롭게 추가·삭제하고, 체크로 켜고 끕니다. 자동 실행을 켜면 켜진 시각 전(위에서 고른 30초~10분 전)에 알람이 울립니다 — " +
+                    "이어폰이 연결돼 있으면 이어폰으로도 소리가 납니다([알림 소리 테스트]로 확인). 그때 화면 잠금을 풀고 폰을 켜 두세요. 앱이 자동으로 열려 경로를 따라 이동하고 오픈 시각에 누릅니다. " +
                     "접근성 서비스가 켜져 있어야 하고, 배터리 설정에서 이 앱을 '제한 없음'으로 두면 가장 안정적입니다.",
             ),
         )
@@ -195,7 +220,6 @@ class MainActivity : Activity() {
             field(b, K_AFTER_SCROLL, "스크롤이 끝난 뒤 다음 동작까지 대기 (초, 0~5, 기본 0 = 바로 — 스크롤 직후 클릭이 안 먹으면 0.3~0.5)")
             field(b, K_AFTER, "화면이 뜬 뒤 클릭까지 대기 (초, 0~5, 기본 0.5 — 뜨자마자 누르면 안 눌릴 때 늘리기)")
             field(b, K_SWIPE, "스크롤 속도: 손가락 이동을 기록의 몇 배 빠르게 (0.5~8, 기본 2 — 스크롤 거리는 그대로)")
-            field(b, K_WARN, "자동 실행 알람: 회차 몇 초 전에 울릴지 (20~600, 기본 60)")
             field(b, K_LEAD, "미리 누르기 lead (ms)")
             field(b, K_INTERVAL, "재시도 간격 (ms)")
             field(b, K_ATTEMPTS, "최대 시도 횟수")
@@ -256,6 +280,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        Alerts.stopSound() // 알람 알림을 탭해 앱을 열면 이어폰 소리를 멈춘다
         // 경로 기록이 끝났으면 기록된 단계를 가져와 저장
         Store.takePendingSteps(this, profile.id)?.let { steps ->
             fields.getValue(K_STEPS).setText(steps)
@@ -728,7 +753,7 @@ class MainActivity : Activity() {
         success = f(K_SUCCESS), already = f(K_ALREADY), soldout = f(K_SOLDOUT),
         refreshOnMiss = refreshCb.isChecked,
         slots = slotsText, slotsOff = slotsOff,
-        autoRun = autoCb.isChecked, warnSec = f(K_WARN),
+        autoRun = autoCb.isChecked, warnSec = WarnLead.secAt(warnSpinner.selectedItemPosition).toString(),
         launchLeadSec = f(K_LAUNCH), swipeSpeed = f(K_SWIPE), afterScreenSec = f(K_AFTER), afterScrollSec = f(K_AFTER_SCROLL),
         showDots = dotsCb.isChecked,
     )
@@ -750,7 +775,7 @@ class MainActivity : Activity() {
         fields.getValue(K_SOLDOUT).setText(s.soldout)
         refreshCb.isChecked = s.refreshOnMiss
         dotsCb.isChecked = s.showDots
-        fields.getValue(K_WARN).setText(s.warnSec)
+        warnSpinner.setSelection(WarnLead.indexFor(s.warnSec.trim().toIntOrNull()))
         fields.getValue(K_LAUNCH).setText(s.launchLeadSec)
         fields.getValue(K_SWIPE).setText(s.swipeSpeed)
         fields.getValue(K_AFTER).setText(s.afterScreenSec)
@@ -765,6 +790,15 @@ class MainActivity : Activity() {
 
     // ---- UI 헬퍼 ----
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+
+    /** [알림 소리 테스트]: 실제 알람과 똑같이 울려 본다(알림 + 진동 + 이어폰이 있으면 이어폰으로도 소리) */
+    private fun testAlert() {
+        val ear = Alerts.warn(this, "🔔 알림 테스트", "이 알림이 보이고 소리가 나면 정상입니다 (탭하면 소리가 멈춥니다)", timeoutMs = 20_000)
+        toast(
+            if (ear != null) "이어폰($ear)으로 소리를 냅니다 — 안 들리면 알려 주세요"
+            else "이어폰이 연결돼 있지 않아 스피커(알람음)로 울립니다. 이어폰을 꽂고 다시 눌러 보세요",
+        )
+    }
 
     private fun note(t: String) = TextView(this).apply {
         text = t
@@ -838,7 +872,6 @@ class MainActivity : Activity() {
     companion object {
         private const val K_PKG = "pkg"
         private const val K_LEAD = "leadMs"
-        private const val K_WARN = "warnSec"
         private const val K_LAUNCH = "launchLeadSec"
         private const val K_SWIPE = "swipeSpeed"
         private const val K_AFTER = "afterScreenSec"
